@@ -4753,6 +4753,900 @@ def get_text_by_slide() -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
+# DESIGN SYSTEM — Grid Engine, Typography, Palettes, Asset Catalog
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Slide dimensions (16:9 widescreen)
+_SLIDE_W = 10.0
+_SLIDE_H = 5.625
+_MARGIN = 0.5
+_USABLE_W = _SLIDE_W - 2 * _MARGIN  # 9.0
+_USABLE_H = _SLIDE_H - 2 * _MARGIN  # 4.625
+_GRID_COLS = 12
+_GUTTER = 0.15
+_COL_W = (_USABLE_W - (_GRID_COLS - 1) * _GUTTER) / _GRID_COLS  # ~0.6125
+
+# Footer constants
+_FOOTER_H = 0.375
+_FOOTER_TOP = _SLIDE_H - _FOOTER_H  # 5.25
+
+# Typography scale (points)
+TYPO = {
+    "hero": 36,
+    "heading": 28,
+    "subheading": 14,
+    "section_label": 10,
+    "stat": 26,
+    "body": 11,
+    "caption": 9,
+    "footer": 7.5,
+}
+
+# Color palettes — each defines roles
+PALETTES = {
+    "dark_executive": {
+        "bg": "#060F1A",
+        "surface": "#0D1F30",
+        "surface_alt": "#0A1525",
+        "primary": "#0A7E8C",
+        "secondary": "#00BCD4",
+        "accent": "#F57C00",
+        "accent2": "#E91E63",
+        "text": "#FFFFFF",
+        "text_dim": "#8899AA",
+        "text_muted": "#556677",
+        "border": "#1A3A50",
+        "highlight_bg": "#0A7E8C",
+        "highlight_text": "#FFFFFF",
+        "footer_bg": "#040C14",
+        "footer_line": "#0A7E8C",
+        "footer_brand": "#0A7E8C",
+        "footer_text": "#3A5060",
+        "top_bar": "#00BCD4",
+        "top_bar2": "#0A7E8C",
+    },
+    "midnight_blue": {
+        "bg": "#0A0E1A",
+        "surface": "#141B2D",
+        "surface_alt": "#0F1422",
+        "primary": "#4A6CF7",
+        "secondary": "#7B93FF",
+        "accent": "#FF6B6B",
+        "accent2": "#FFD93D",
+        "text": "#FFFFFF",
+        "text_dim": "#8892A4",
+        "text_muted": "#4A5568",
+        "border": "#1E2A3A",
+        "highlight_bg": "#4A6CF7",
+        "highlight_text": "#FFFFFF",
+        "footer_bg": "#060810",
+        "footer_line": "#4A6CF7",
+        "footer_brand": "#4A6CF7",
+        "footer_text": "#3A4560",
+        "top_bar": "#7B93FF",
+        "top_bar2": "#4A6CF7",
+    },
+    "light_corporate": {
+        "bg": "#FFFFFF",
+        "surface": "#F5F7FA",
+        "surface_alt": "#EDF0F5",
+        "primary": "#0A7E8C",
+        "secondary": "#004D61",
+        "accent": "#F57C00",
+        "accent2": "#E91E63",
+        "text": "#1A2332",
+        "text_dim": "#5A6B7D",
+        "text_muted": "#8899AA",
+        "border": "#D0D8E0",
+        "highlight_bg": "#0A7E8C",
+        "highlight_text": "#FFFFFF",
+        "footer_bg": "#F0F2F5",
+        "footer_line": "#D0D8E0",
+        "footer_brand": "#0A7E8C",
+        "footer_text": "#8899AA",
+        "top_bar": "#0A7E8C",
+        "top_bar2": "#004D61",
+    },
+}
+
+
+def _grid_pos(col_start: int, col_span: int, row_top: float, row_height: float) -> dict:
+    """Calculate position from grid coordinates.
+
+    col_start: 1-based column (1..12)
+    col_span: number of columns to span
+    row_top: top position in inches from slide top
+    row_height: height in inches
+    Returns: {left, top, width, height} in inches
+    """
+    left = _MARGIN + (col_start - 1) * (_COL_W + _GUTTER)
+    width = col_span * _COL_W + (col_span - 1) * _GUTTER
+    return {"left": round(left, 4), "top": row_top, "width": round(width, 4), "height": row_height}
+
+
+def _card_positions(count: int, top: float, height: float, margin: float = 0.5, gap: float = 0.2) -> list:
+    """Calculate evenly-spaced card positions across the usable width.
+
+    Returns list of {left, top, width, height} dicts.
+    """
+    total_gap = (count - 1) * gap
+    card_w = (_USABLE_W - total_gap) / count
+    positions = []
+    for i in range(count):
+        left = margin + i * (card_w + gap)
+        positions.append({"left": round(left, 4), "top": top, "width": round(card_w, 4), "height": height})
+    return positions
+
+
+def _get_palette(name: str) -> dict:
+    """Get a palette by name, defaulting to dark_executive."""
+    return PALETTES.get(name, PALETTES["dark_executive"])
+
+
+# Asset catalog scanner
+_ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
+
+def _scan_assets() -> dict:
+    """Scan the assets directory and return categorized file paths."""
+    catalog = {"icons": {}, "backgrounds": {}, "infographics": {}}
+    if not os.path.isdir(_ASSET_DIR):
+        return catalog
+    for root, _dirs, files in os.walk(_ASSET_DIR):
+        rel = os.path.relpath(root, _ASSET_DIR).lower()
+        for f in files:
+            if not f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".svg")):
+                continue
+            full = os.path.join(root, f)
+            name = os.path.splitext(f)[0].lower()
+            if "icon" in rel:
+                catalog["icons"][name] = full
+            elif "background" in rel or "bg" in rel:
+                catalog["backgrounds"][name] = full
+            elif "infographic" in rel or "info" in rel:
+                catalog["infographics"][name] = full
+            else:
+                catalog["icons"][name] = full  # default to icons
+    return catalog
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMPOUND SLIDE BUILDER HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_top_bar(slide, pal: dict):
+    """Add the thin accent bar at the very top of the slide."""
+    slide.Shapes.AddShape(1, 0, 0, _inches_to_points(_SLIDE_W), _inches_to_points(0.035))
+    bar1 = slide.Shapes(slide.Shapes.Count)
+    bar1.Fill.Solid()
+    bar1.Fill.ForeColor.RGB = _parse_color(pal["top_bar"])
+    bar1.Line.Visible = 0
+
+    slide.Shapes.AddShape(1, 0, _inches_to_points(0.035), _inches_to_points(_SLIDE_W), _inches_to_points(0.015))
+    bar2 = slide.Shapes(slide.Shapes.Count)
+    bar2.Fill.Solid()
+    bar2.Fill.ForeColor.RGB = _parse_color(pal["top_bar2"])
+    bar2.Line.Visible = 0
+
+
+def _build_badge(slide, text: str, pal: dict):
+    """Add the section badge (e.g., 'SITUATION | 02') top-right."""
+    l = _inches_to_points(8.05)
+    t = _inches_to_points(0.18)
+    w = _inches_to_points(1.65)
+    h = _inches_to_points(0.4)
+    shape = slide.Shapes.AddShape(5, l, t, w, h)  # rounded_rectangle
+    shape.Fill.Solid()
+    shape.Fill.ForeColor.RGB = _parse_color(pal["primary"])
+    shape.Line.Visible = 0
+    tr = shape.TextFrame.TextRange
+    tr.Text = text
+    tr.Font.Size = TYPO["section_label"]
+    tr.Font.Name = "Segoe UI"
+    tr.Font.Bold = -1
+    tr.Font.Color.RGB = _parse_color("#FFFFFF")
+    tr.ParagraphFormat.Alignment = 2  # center
+
+
+def _build_footer(slide, pal: dict, brand: str = "Deloitte.", meta: str = "", page: str = ""):
+    """Add the branded footer bar at the bottom."""
+    # Footer background
+    ft = slide.Shapes.AddShape(1, 0, _inches_to_points(_FOOTER_TOP), _inches_to_points(_SLIDE_W), _inches_to_points(_FOOTER_H))
+    ft.Fill.Solid()
+    ft.Fill.ForeColor.RGB = _parse_color(pal["footer_bg"])
+    ft.Line.Visible = 0
+
+    # Top line
+    line = slide.Shapes.AddLine(0, _inches_to_points(_FOOTER_TOP), _inches_to_points(_SLIDE_W), _inches_to_points(_FOOTER_TOP))
+    line.Line.ForeColor.RGB = _parse_color(pal["footer_line"])
+    line.Line.Weight = 0.5
+
+    # Brand name
+    tb = slide.Shapes.AddTextbox(1, _inches_to_points(0.4), _inches_to_points(_FOOTER_TOP + 0.05), _inches_to_points(1.2), _inches_to_points(0.25))
+    tb.TextFrame.TextRange.Text = brand
+    tb.TextFrame.TextRange.Font.Size = 10
+    tb.TextFrame.TextRange.Font.Name = "Segoe UI"
+    tb.TextFrame.TextRange.Font.Bold = -1
+    tb.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["footer_brand"])
+
+    # Meta text
+    if meta:
+        tb2 = slide.Shapes.AddTextbox(1, _inches_to_points(2.0), _inches_to_points(_FOOTER_TOP + 0.06), _inches_to_points(5.5), _inches_to_points(0.22))
+        tb2.TextFrame.TextRange.Text = meta
+        tb2.TextFrame.TextRange.Font.Size = TYPO["footer"]
+        tb2.TextFrame.TextRange.Font.Name = "Segoe UI"
+        tb2.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["footer_text"])
+
+    # Page number
+    if page:
+        tb3 = slide.Shapes.AddTextbox(1, _inches_to_points(8.5), _inches_to_points(_FOOTER_TOP + 0.05), _inches_to_points(1.2), _inches_to_points(0.22))
+        tb3.TextFrame.TextRange.Text = page
+        tb3.TextFrame.TextRange.Font.Size = TYPO["caption"]
+        tb3.TextFrame.TextRange.Font.Name = "Segoe UI"
+        tb3.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["footer_text"])
+        tb3.TextFrame.TextRange.ParagraphFormat.Alignment = 3  # right
+
+
+def _build_title_block(slide, title: str, subtitle: str, pal: dict):
+    """Add title + subtitle + divider line."""
+    # Title
+    tb = slide.Shapes.AddTextbox(1, _inches_to_points(0.55), _inches_to_points(0.15), _inches_to_points(7.0), _inches_to_points(0.6))
+    tb.TextFrame.TextRange.Text = title
+    tb.TextFrame.TextRange.Font.Size = TYPO["heading"]
+    tb.TextFrame.TextRange.Font.Name = "Segoe UI"
+    tb.TextFrame.TextRange.Font.Bold = -1
+    tb.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["text"])
+
+    # Subtitle
+    tb2 = slide.Shapes.AddTextbox(1, _inches_to_points(0.55), _inches_to_points(0.78), _inches_to_points(7.0), _inches_to_points(0.3))
+    tb2.TextFrame.TextRange.Text = subtitle
+    tb2.TextFrame.TextRange.Font.Size = TYPO["subheading"]
+    tb2.TextFrame.TextRange.Font.Name = "Segoe UI"
+    tb2.TextFrame.TextRange.Font.Italic = -1
+    tb2.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["secondary"])
+
+    # Divider line (spans subtitle width)
+    slide.Shapes.AddLine(
+        _inches_to_points(0.55), _inches_to_points(1.12),
+        _inches_to_points(7.55), _inches_to_points(1.12),
+    ).Line.ForeColor.RGB = _parse_color(pal["primary"])
+
+
+def _build_kpi_card(slide, pos: dict, number: str, label: str, pal: dict, is_highlight: bool = False, dot_color: str = ""):
+    """Build a single KPI card at the given position."""
+    bg = pal["highlight_bg"] if is_highlight else pal["surface"]
+    border = pal["secondary"] if is_highlight else pal["primary"]
+    num_color = pal["highlight_text"] if is_highlight else pal["secondary"]
+    lbl_color = pal["highlight_text"] if is_highlight else pal["text_dim"]
+
+    l, t, w, h = pos["left"], pos["top"], pos["width"], pos["height"]
+
+    # Card background
+    shape = slide.Shapes.AddShape(5, _inches_to_points(l), _inches_to_points(t), _inches_to_points(w), _inches_to_points(h))
+    shape.Fill.Solid()
+    shape.Fill.ForeColor.RGB = _parse_color(bg)
+    shape.Line.ForeColor.RGB = _parse_color(border)
+    shape.Line.Weight = 1
+
+    # Indicator dot
+    if dot_color:
+        dot = slide.Shapes.AddShape(9, _inches_to_points(l + 0.15), _inches_to_points(t + 0.12), _inches_to_points(0.12), _inches_to_points(0.12))
+        dot.Fill.Solid()
+        dot.Fill.ForeColor.RGB = _parse_color(dot_color)
+        dot.Line.Visible = 0
+
+    # Big number — auto-shrink if text is wide (>7 chars)
+    stat_size = TYPO["stat"] if len(number) <= 7 else TYPO["stat"] - 4
+    tb = slide.Shapes.AddTextbox(1, _inches_to_points(l + 0.1), _inches_to_points(t + 0.28), _inches_to_points(w - 0.2), _inches_to_points(0.5))
+    tb.TextFrame.TextRange.Text = number
+    tb.TextFrame.TextRange.Font.Size = stat_size
+    tb.TextFrame.TextRange.Font.Name = "Segoe UI"
+    tb.TextFrame.TextRange.Font.Bold = -1
+    tb.TextFrame.TextRange.Font.Color.RGB = _parse_color(num_color)
+    tb.TextFrame.TextRange.ParagraphFormat.Alignment = 2  # center
+
+    # Label
+    tb2 = slide.Shapes.AddTextbox(1, _inches_to_points(l + 0.1), _inches_to_points(t + 0.78), _inches_to_points(w - 0.2), _inches_to_points(0.3))
+    tb2.TextFrame.TextRange.Text = label
+    tb2.TextFrame.TextRange.Font.Size = TYPO["caption"]
+    tb2.TextFrame.TextRange.Font.Name = "Segoe UI"
+    tb2.TextFrame.TextRange.Font.Color.RGB = _parse_color(lbl_color)
+    tb2.TextFrame.TextRange.ParagraphFormat.Alignment = 2  # center
+
+
+def _build_data_rows(slide, rows: list, top: float, pal: dict):
+    """Build key-value data rows with alternating backgrounds.
+
+    rows: list of (label, value, is_highlight) tuples.
+    Returns the Y position after the last row.
+    """
+    y = top
+    row_h = 0.26
+    for i, (label, value, highlight) in enumerate(rows):
+        # Alternating background
+        if i % 2 == 0:
+            bg = slide.Shapes.AddShape(1, _inches_to_points(0.55), _inches_to_points(y), _inches_to_points(_USABLE_W), _inches_to_points(row_h))
+            bg.Fill.Solid()
+            bg.Fill.ForeColor.RGB = _parse_color(pal["surface_alt"])
+            bg.Line.Visible = 0
+
+        lbl_color = pal["accent"] if highlight else pal["text_dim"]
+        val_color = pal["accent"] if highlight else pal["text"]
+
+        # Label
+        tb = slide.Shapes.AddTextbox(1, _inches_to_points(0.65), _inches_to_points(y + 0.02), _inches_to_points(5.0), _inches_to_points(0.22))
+        tb.TextFrame.TextRange.Text = label
+        tb.TextFrame.TextRange.Font.Size = TYPO["caption"]
+        tb.TextFrame.TextRange.Font.Name = "Segoe UI"
+        tb.TextFrame.TextRange.Font.Color.RGB = _parse_color(lbl_color)
+        if highlight:
+            tb.TextFrame.TextRange.Font.Bold = -1
+
+        # Value
+        tb2 = slide.Shapes.AddTextbox(1, _inches_to_points(5.5), _inches_to_points(y + 0.02), _inches_to_points(4.0), _inches_to_points(0.22))
+        tb2.TextFrame.TextRange.Text = value
+        tb2.TextFrame.TextRange.Font.Size = TYPO["caption"]
+        tb2.TextFrame.TextRange.Font.Name = "Segoe UI"
+        tb2.TextFrame.TextRange.Font.Bold = -1
+        tb2.TextFrame.TextRange.Font.Color.RGB = _parse_color(val_color)
+        tb2.TextFrame.TextRange.ParagraphFormat.Alignment = 3  # right
+
+        y += row_h + 0.01
+    return y
+
+
+def _build_callout(slide, text: str, top: float, pal: dict):
+    """Build an insight callout box with accent left-border."""
+    l = _inches_to_points(0.55)
+    t = _inches_to_points(top)
+    w = _inches_to_points(_USABLE_W)
+    h = _inches_to_points(0.5)
+
+    # Background
+    shape = slide.Shapes.AddShape(5, l, t, w, h)
+    shape.Fill.Solid()
+    shape.Fill.ForeColor.RGB = _parse_color(pal["surface"])
+    shape.Line.ForeColor.RGB = _parse_color(pal["border"])
+    shape.Line.Weight = 0.75
+
+    # Accent left bar
+    bar = slide.Shapes.AddShape(1, l, t, _inches_to_points(0.05), h)
+    bar.Fill.Solid()
+    bar.Fill.ForeColor.RGB = _parse_color(pal["accent"])
+    bar.Line.Visible = 0
+
+    # Text
+    tb = slide.Shapes.AddTextbox(1, _inches_to_points(0.75), _inches_to_points(top + 0.03), _inches_to_points(_USABLE_W - 0.3), _inches_to_points(0.44))
+    tb.TextFrame.TextRange.Text = text
+    tb.TextFrame.TextRange.Font.Size = TYPO["body"] - 1
+    tb.TextFrame.TextRange.Font.Name = "Segoe UI"
+    tb.TextFrame.TextRange.Font.Italic = -1
+    tb.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["text_dim"])
+    tb.TextFrame.WordWrap = -1
+
+
+def _clear_slide(pres, slide_index: int):
+    """Delete all shapes on a slide."""
+    slide = get_slide(pres, slide_index)
+    while slide.Shapes.Count > 0:
+        slide.Shapes(slide.Shapes.Count).Delete()
+    return slide
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMPOUND SLIDE BUILDER TOOLS (Phase 8)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def build_kpi_slide(
+    slide_index: int,
+    title: str,
+    subtitle: str,
+    kpis_json: str,
+    badge: str = "",
+    rows_json: str = "",
+    callout: str = "",
+    palette: str = "dark_executive",
+    footer_meta: str = "",
+    page: str = "",
+    clear: bool = True,
+) -> str:
+    """Build a complete KPI dashboard slide from structured data.
+
+    slide_index: 1-based slide index to rebuild.
+    title: main heading text.
+    subtitle: secondary text below title.
+    kpis_json: JSON array of {number, label, dot_color?, highlight?} objects (1-6 cards).
+    badge: section badge text, e.g. 'SITUATION | 02'. Empty to skip.
+    rows_json: optional JSON array of [label, value, highlight?] for data table rows.
+    callout: optional insight text for bottom callout box. Empty to skip.
+    palette: color palette name (dark_executive, midnight_blue, light_corporate).
+    footer_meta: footer metadata text. Empty to skip footer.
+    page: page number text, e.g. '2 / 8'. Empty to skip.
+    clear: if True, delete all existing shapes before building. Default True.
+    """
+    try:
+        app = get_app()
+        pres = get_pres(app)
+        _require_writable(pres)
+        pal = _get_palette(palette)
+        kpis = _validate_json_list(kpis_json, "kpis_json")
+
+        slide = _clear_slide(pres, slide_index) if clear else get_slide(pres, slide_index)
+
+        # Background
+        slide.FollowMasterBackground = 0
+        slide.Background.Fill.Solid()
+        slide.Background.Fill.ForeColor.RGB = _parse_color(pal["bg"])
+
+        # Decorative circles (background geometry)
+        c1 = slide.Shapes.AddShape(9, _inches_to_points(7.5), _inches_to_points(-1.0), _inches_to_points(4.0), _inches_to_points(4.0))
+        c1.Fill.Solid()
+        c1.Fill.ForeColor.RGB = _parse_color(pal["surface_alt"])
+        c1.Line.ForeColor.RGB = _parse_color(pal["primary"])
+        c1.Line.Weight = 0.75
+        c1.ZOrder(1)  # send to back
+
+        c2 = slide.Shapes.AddShape(9, _inches_to_points(8.2), _inches_to_points(-0.3), _inches_to_points(2.6), _inches_to_points(2.6))
+        c2.Fill.Solid()
+        c2.Fill.ForeColor.RGB = _parse_color(pal["bg"])
+        c2.Line.ForeColor.RGB = _parse_color(pal["primary"])
+        c2.Line.Weight = 0.5
+        c2.ZOrder(1)
+
+        # Top bar
+        _build_top_bar(slide, pal)
+
+        # Badge
+        if badge:
+            _build_badge(slide, badge, pal)
+
+        # Title block
+        _build_title_block(slide, title, subtitle, pal)
+
+        # KPI cards
+        card_count = len(kpis)
+        positions = _card_positions(card_count, top=1.3, height=1.15)
+        dot_colors = [pal["accent"], pal["secondary"], pal.get("accent2", pal["accent"]), "#FFFFFF"]
+        for i, kpi in enumerate(kpis):
+            dot = kpi.get("dot_color", dot_colors[i % len(dot_colors)])
+            _build_kpi_card(
+                slide, positions[i],
+                number=kpi["number"],
+                label=kpi["label"],
+                pal=pal,
+                is_highlight=kpi.get("highlight", False),
+                dot_color=dot,
+            )
+
+        # Data rows
+        next_y = 2.65
+        if rows_json:
+            rows = _validate_json_list(rows_json, "rows_json")
+            parsed_rows = [(r[0], r[1], r[2] if len(r) > 2 else False) for r in rows]
+            # Section label
+            lbl = slide.Shapes.AddTextbox(1, _inches_to_points(0.55), _inches_to_points(2.65), _inches_to_points(4.0), _inches_to_points(0.25))
+            lbl.TextFrame.TextRange.Text = "CURRENT STATE BREAKDOWN"
+            lbl.TextFrame.TextRange.Font.Size = TYPO["section_label"]
+            lbl.TextFrame.TextRange.Font.Name = "Segoe UI"
+            lbl.TextFrame.TextRange.Font.Bold = -1
+            lbl.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["primary"])
+            next_y = _build_data_rows(slide, parsed_rows, top=2.92, pal=pal)
+
+        # Callout
+        if callout:
+            callout_top = max(next_y + 0.08, 4.55)
+            _build_callout(slide, callout, callout_top, pal)
+
+        # Footer
+        if footer_meta or page:
+            _build_footer(slide, pal, meta=footer_meta, page=page)
+
+        return _ok({
+            "status": "built",
+            "slide_index": slide_index,
+            "tool": "build_kpi_slide",
+            "kpi_count": card_count,
+            "palette": palette,
+        })
+    except (PPTError, json.JSONDecodeError) as e:
+        return _err(e)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def build_title_slide(
+    slide_index: int,
+    title: str,
+    subtitle: str,
+    metadata_json: str = "",
+    palette: str = "dark_executive",
+    footer_text: str = "",
+    clear: bool = True,
+) -> str:
+    """Build a polished title/cover slide.
+
+    slide_index: 1-based slide index.
+    title: hero title text (large).
+    subtitle: tagline below the title.
+    metadata_json: optional JSON array of [label, value] pairs (e.g. [["CLIENT","SITE"],["DATE","Feb 2026"]]).
+    palette: color palette name.
+    footer_text: bottom confidential notice. Empty to skip.
+    clear: if True, delete all existing shapes first.
+    """
+    try:
+        app = get_app()
+        pres = get_pres(app)
+        _require_writable(pres)
+        pal = _get_palette(palette)
+
+        slide = _clear_slide(pres, slide_index) if clear else get_slide(pres, slide_index)
+
+        # Background
+        slide.FollowMasterBackground = 0
+        slide.Background.Fill.Solid()
+        slide.Background.Fill.ForeColor.RGB = _parse_color(pal["bg"])
+
+        # Decorative circles
+        c1 = slide.Shapes.AddShape(9, _inches_to_points(7.5), _inches_to_points(0.5), _inches_to_points(4.0), _inches_to_points(4.0))
+        c1.Fill.Solid()
+        c1.Fill.ForeColor.RGB = _parse_color(pal["surface_alt"])
+        c1.Line.ForeColor.RGB = _parse_color(pal["primary"])
+        c1.Line.Weight = 1
+        c1.ZOrder(1)
+
+        c2 = slide.Shapes.AddShape(9, _inches_to_points(8.0), _inches_to_points(1.1), _inches_to_points(2.8), _inches_to_points(2.8))
+        c2.Fill.Solid()
+        c2.Fill.ForeColor.RGB = _parse_color(pal["bg"])
+        c2.Line.ForeColor.RGB = _parse_color(pal["primary"])
+        c2.Line.Weight = 0.75
+        c2.ZOrder(1)
+
+        # Top bars
+        _build_top_bar(slide, pal)
+
+        # Left accent bar
+        lb = slide.Shapes.AddShape(1, 0, 0, _inches_to_points(0.06), _inches_to_points(_SLIDE_H))
+        lb.Fill.Solid()
+        lb.Fill.ForeColor.RGB = _parse_color(pal["primary"])
+        lb.Line.Visible = 0
+
+        # Hero title
+        tb = slide.Shapes.AddTextbox(1, _inches_to_points(0.8), _inches_to_points(1.2), _inches_to_points(7.0), _inches_to_points(1.2))
+        tb.TextFrame.TextRange.Text = title
+        tb.TextFrame.TextRange.Font.Size = TYPO["hero"]
+        tb.TextFrame.TextRange.Font.Name = "Segoe UI"
+        tb.TextFrame.TextRange.Font.Bold = -1
+        tb.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["text"])
+
+        # Subtitle
+        tb2 = slide.Shapes.AddTextbox(1, _inches_to_points(0.8), _inches_to_points(2.45), _inches_to_points(7.0), _inches_to_points(0.4))
+        tb2.TextFrame.TextRange.Text = subtitle
+        tb2.TextFrame.TextRange.Font.Size = 18
+        tb2.TextFrame.TextRange.Font.Name = "Segoe UI"
+        tb2.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["secondary"])
+
+        # Divider
+        slide.Shapes.AddLine(
+            _inches_to_points(0.8), _inches_to_points(3.0),
+            _inches_to_points(6.3), _inches_to_points(3.0),
+        ).Line.ForeColor.RGB = _parse_color(pal["primary"])
+
+        # Metadata grid
+        if metadata_json:
+            meta = _validate_json_list(metadata_json, "metadata_json")
+            col_w = 3.2
+            y = 3.2
+            for i, item in enumerate(meta):
+                label = item[0] if len(item) > 0 else ""
+                value = item[1] if len(item) > 1 else ""
+                col = i % 2
+                row = i // 2
+                x = 0.8 + col * col_w
+                cy = y + row * 0.42
+
+                # Label
+                lbl = slide.Shapes.AddTextbox(1, _inches_to_points(x), _inches_to_points(cy), _inches_to_points(2.8), _inches_to_points(0.16))
+                lbl.TextFrame.TextRange.Text = label.upper()
+                lbl.TextFrame.TextRange.Font.Size = 8
+                lbl.TextFrame.TextRange.Font.Name = "Segoe UI"
+                lbl.TextFrame.TextRange.Font.Bold = -1
+                lbl.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["primary"])
+
+                # Value
+                val = slide.Shapes.AddTextbox(1, _inches_to_points(x), _inches_to_points(cy + 0.15), _inches_to_points(2.8), _inches_to_points(0.22))
+                val.TextFrame.TextRange.Text = value
+                val.TextFrame.TextRange.Font.Size = 11
+                val.TextFrame.TextRange.Font.Name = "Segoe UI"
+                val.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["text_dim"])
+
+        # Footer text
+        if footer_text:
+            ft = slide.Shapes.AddTextbox(1, _inches_to_points(0.8), _inches_to_points(5.05), _inches_to_points(5.0), _inches_to_points(0.25))
+            ft.TextFrame.TextRange.Text = footer_text
+            ft.TextFrame.TextRange.Font.Size = TYPO["footer"]
+            ft.TextFrame.TextRange.Font.Name = "Segoe UI"
+            ft.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["text_muted"])
+
+        return _ok({
+            "status": "built",
+            "slide_index": slide_index,
+            "tool": "build_title_slide",
+            "palette": palette,
+        })
+    except (PPTError, json.JSONDecodeError) as e:
+        return _err(e)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def build_comparison_slide(
+    slide_index: int,
+    title: str,
+    subtitle: str = "",
+    left_json: str = "",
+    right_json: str = "",
+    badge: str = "",
+    callout: str = "",
+    palette: str = "dark_executive",
+    footer_meta: str = "",
+    page: str = "",
+    clear: bool = True,
+) -> str:
+    """Build a two-column comparison slide.
+
+    left_json: JSON object {heading, items: [{text, bold?}]}.
+    right_json: JSON object {heading, items: [{text, bold?}]}.
+    """
+    try:
+        app = get_app()
+        pres = get_pres(app)
+        _require_writable(pres)
+        pal = _get_palette(palette)
+
+        slide = _clear_slide(pres, slide_index) if clear else get_slide(pres, slide_index)
+
+        # Background
+        slide.FollowMasterBackground = 0
+        slide.Background.Fill.Solid()
+        slide.Background.Fill.ForeColor.RGB = _parse_color(pal["bg"])
+
+        _build_top_bar(slide, pal)
+        if badge:
+            _build_badge(slide, badge, pal)
+        _build_title_block(slide, title, subtitle, pal)
+
+        # Two columns
+        col_w = 4.3
+        col_gap = 0.4
+        col_left_x = _MARGIN
+        col_right_x = _MARGIN + col_w + col_gap
+
+        for col_x, data_json, is_right in [(col_left_x, left_json, False), (col_right_x, right_json, True)]:
+            if not data_json:
+                continue
+            data = json.loads(data_json)
+            heading = data.get("heading", "")
+            items = data.get("items", [])
+
+            # Column heading
+            hd = slide.Shapes.AddTextbox(1, _inches_to_points(col_x), _inches_to_points(1.3), _inches_to_points(col_w), _inches_to_points(0.3))
+            hd.TextFrame.TextRange.Text = heading
+            hd.TextFrame.TextRange.Font.Size = TYPO["section_label"]
+            hd.TextFrame.TextRange.Font.Name = "Segoe UI"
+            hd.TextFrame.TextRange.Font.Bold = -1
+            hd.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["primary"] if not is_right else pal["secondary"])
+
+            # Items
+            y = 1.65
+            for item in items:
+                txt = item.get("text", item) if isinstance(item, dict) else str(item)
+                is_bold = item.get("bold", False) if isinstance(item, dict) else False
+
+                tb = slide.Shapes.AddTextbox(1, _inches_to_points(col_x + 0.15), _inches_to_points(y), _inches_to_points(col_w - 0.3), _inches_to_points(0.25))
+                tb.TextFrame.TextRange.Text = txt
+                tb.TextFrame.TextRange.Font.Size = TYPO["body"]
+                tb.TextFrame.TextRange.Font.Name = "Segoe UI"
+                tb.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["text"] if is_bold else pal["text_dim"])
+                if is_bold:
+                    tb.TextFrame.TextRange.Font.Bold = -1
+                tb.TextFrame.WordWrap = -1
+                y += 0.3
+
+        # Vertical divider between columns
+        mid_x = col_left_x + col_w + col_gap / 2
+        slide.Shapes.AddLine(
+            _inches_to_points(mid_x), _inches_to_points(1.3),
+            _inches_to_points(mid_x), _inches_to_points(4.4),
+        ).Line.ForeColor.RGB = _parse_color(pal["border"])
+
+        if callout:
+            _build_callout(slide, callout, 4.55, pal)
+        if footer_meta or page:
+            _build_footer(slide, pal, meta=footer_meta, page=page)
+
+        return _ok({
+            "status": "built",
+            "slide_index": slide_index,
+            "tool": "build_comparison_slide",
+            "palette": palette,
+        })
+    except (PPTError, json.JSONDecodeError) as e:
+        return _err(e)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def build_timeline_slide(
+    slide_index: int,
+    title: str,
+    subtitle: str = "",
+    phases_json: str = "",
+    badge: str = "",
+    callout: str = "",
+    palette: str = "dark_executive",
+    footer_meta: str = "",
+    page: str = "",
+    clear: bool = True,
+) -> str:
+    """Build a horizontal timeline/phases slide.
+
+    phases_json: JSON array of {label, title, description?, timeline?, investment?} objects.
+    """
+    try:
+        app = get_app()
+        pres = get_pres(app)
+        _require_writable(pres)
+        pal = _get_palette(palette)
+        phases = _validate_json_list(phases_json, "phases_json") if phases_json else []
+
+        slide = _clear_slide(pres, slide_index) if clear else get_slide(pres, slide_index)
+
+        # Background
+        slide.FollowMasterBackground = 0
+        slide.Background.Fill.Solid()
+        slide.Background.Fill.ForeColor.RGB = _parse_color(pal["bg"])
+
+        _build_top_bar(slide, pal)
+        if badge:
+            _build_badge(slide, badge, pal)
+        _build_title_block(slide, title, subtitle, pal)
+
+        # Phase cards
+        if phases:
+            count = len(phases)
+            positions = _card_positions(count, top=1.4, height=2.8, gap=0.15)
+
+            # Connecting line through all phases
+            first_center = positions[0]["left"] + positions[0]["width"] / 2
+            last_center = positions[-1]["left"] + positions[-1]["width"] / 2
+            line = slide.Shapes.AddLine(
+                _inches_to_points(first_center), _inches_to_points(1.7),
+                _inches_to_points(last_center), _inches_to_points(1.7),
+            )
+            line.Line.ForeColor.RGB = _parse_color(pal["primary"])
+            line.Line.Weight = 2
+
+            for i, (phase, pos) in enumerate(zip(phases, positions)):
+                is_last = (i == count - 1)
+                l, t, w, h = pos["left"], pos["top"], pos["width"], pos["height"]
+
+                # Phase number circle
+                cx = l + w / 2 - 0.18
+                circle = slide.Shapes.AddShape(9, _inches_to_points(cx), _inches_to_points(t), _inches_to_points(0.36), _inches_to_points(0.36))
+                circle.Fill.Solid()
+                circle.Fill.ForeColor.RGB = _parse_color(pal["highlight_bg"] if is_last else pal["surface"])
+                circle.Line.ForeColor.RGB = _parse_color(pal["primary"])
+                circle.Line.Weight = 1.5
+                circle.TextFrame.TextRange.Text = phase.get("label", str(i + 1))
+                circle.TextFrame.TextRange.Font.Size = 10
+                circle.TextFrame.TextRange.Font.Name = "Segoe UI"
+                circle.TextFrame.TextRange.Font.Bold = -1
+                circle.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["text"])
+                circle.TextFrame.TextRange.ParagraphFormat.Alignment = 2
+
+                # Card body
+                card = slide.Shapes.AddShape(5, _inches_to_points(l), _inches_to_points(t + 0.5), _inches_to_points(w), _inches_to_points(h - 0.5))
+                card.Fill.Solid()
+                card.Fill.ForeColor.RGB = _parse_color(pal["highlight_bg"] if is_last else pal["surface"])
+                card.Line.ForeColor.RGB = _parse_color(pal["primary"])
+                card.Line.Weight = 0.75
+
+                # Phase title
+                tb = slide.Shapes.AddTextbox(1, _inches_to_points(l + 0.1), _inches_to_points(t + 0.6), _inches_to_points(w - 0.2), _inches_to_points(0.3))
+                tb.TextFrame.TextRange.Text = phase.get("title", "")
+                tb.TextFrame.TextRange.Font.Size = 11
+                tb.TextFrame.TextRange.Font.Name = "Segoe UI"
+                tb.TextFrame.TextRange.Font.Bold = -1
+                tb.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["text"])
+                tb.TextFrame.TextRange.ParagraphFormat.Alignment = 2
+                tb.TextFrame.WordWrap = -1
+
+                # Description
+                desc = phase.get("description", "")
+                if desc:
+                    tb2 = slide.Shapes.AddTextbox(1, _inches_to_points(l + 0.1), _inches_to_points(t + 1.0), _inches_to_points(w - 0.2), _inches_to_points(0.8))
+                    tb2.TextFrame.TextRange.Text = desc
+                    tb2.TextFrame.TextRange.Font.Size = 8
+                    tb2.TextFrame.TextRange.Font.Name = "Segoe UI"
+                    tb2.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["text_dim"])
+                    tb2.TextFrame.TextRange.ParagraphFormat.Alignment = 2
+                    tb2.TextFrame.WordWrap = -1
+
+                # Timeline / Investment
+                timeline = phase.get("timeline", "")
+                invest = phase.get("investment", "")
+                extra = []
+                if timeline:
+                    extra.append(timeline)
+                if invest:
+                    extra.append(invest)
+                if extra:
+                    tb3 = slide.Shapes.AddTextbox(1, _inches_to_points(l + 0.1), _inches_to_points(t + h - 0.55), _inches_to_points(w - 0.2), _inches_to_points(0.4))
+                    tb3.TextFrame.TextRange.Text = "\n".join(extra)
+                    tb3.TextFrame.TextRange.Font.Size = 8
+                    tb3.TextFrame.TextRange.Font.Name = "Segoe UI"
+                    tb3.TextFrame.TextRange.Font.Color.RGB = _parse_color(pal["secondary"])
+                    tb3.TextFrame.TextRange.ParagraphFormat.Alignment = 2
+                    tb3.TextFrame.WordWrap = -1
+
+        if callout:
+            _build_callout(slide, callout, 4.55, pal)
+        if footer_meta or page:
+            _build_footer(slide, pal, meta=footer_meta, page=page)
+
+        return _ok({
+            "status": "built",
+            "slide_index": slide_index,
+            "tool": "build_timeline_slide",
+            "phase_count": len(phases),
+            "palette": palette,
+        })
+    except (PPTError, json.JSONDecodeError) as e:
+        return _err(e)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def list_palettes() -> str:
+    """List all available design palettes with their color roles."""
+    try:
+        result = []
+        for name, pal in PALETTES.items():
+            result.append({
+                "name": name,
+                "colors": {k: v for k, v in pal.items()},
+            })
+        return _ok_list(result, "palettes")
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def list_assets() -> str:
+    """Scan the assets directory and list available icons, backgrounds, and infographics."""
+    try:
+        catalog = _scan_assets()
+        return _ok({
+            "status": "ok",
+            "asset_dir": _ASSET_DIR,
+            "icons": list(catalog["icons"].keys()),
+            "backgrounds": list(catalog["backgrounds"].keys()),
+            "infographics": list(catalog["infographics"].keys()),
+            "total": sum(len(v) for v in catalog.values()),
+        })
+    except Exception as e:
+        return _err(e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     mcp.run()
