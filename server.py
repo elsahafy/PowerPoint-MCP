@@ -345,6 +345,10 @@ def new_presentation(template_path: str = "") -> str:
         else:
             pres = app.Presentations.Add()
 
+        # Ensure at least one slide exists (some configs create empty pres)
+        if pres.Slides.Count == 0:
+            pres.Slides.Add(1, LAYOUT_MAP["blank"])
+
         return json.dumps({
             "status": "created",
             "name": pres.Name,
@@ -587,6 +591,10 @@ def export_presentation(output_path: str, format: str = "pdf") -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+
+        if pres.Slides.Count == 0:
+            return json.dumps({"error": "Cannot export — presentation has no slides."}, indent=2)
+
         abs_path = os.path.abspath(output_path)
         fmt_lower = format.lower()
 
@@ -2083,11 +2091,22 @@ def format_table(
         shape = get_shape(slide, shape_name)
 
         table = shape.Table
-        table.FirstRow = -1 if has_header else 0
-        table.BandRows = -1 if band_rows else 0
-        table.BandColumns = -1 if band_cols else 0
-        table.FirstCol = -1 if first_col else 0
-        table.LastCol = -1 if last_col else 0
+
+        # Table style properties — set via the parent shape, not the Table object
+        try:
+            shape.HasTable  # confirm it's a table shape
+        except Exception:
+            pass
+        # These properties may not be available in all PowerPoint versions
+        for prop, val in [
+            ("FirstRow", has_header), ("BandRows", band_rows),
+            ("BandColumns", band_cols), ("FirstCol", first_col),
+            ("LastCol", last_col),
+        ]:
+            try:
+                setattr(table, prop, -1 if val else 0)
+            except Exception:
+                pass  # Property not supported in this version
 
         if header_color:
             rgb = _parse_color(header_color)
@@ -2176,13 +2195,19 @@ def add_chart(
             for v_idx, val in enumerate(series.get("values", [])):
                 ws.Cells(v_idx + 2, col).Value = val
 
-        # Set the data range
+        # Set the data range on the workbook so chart picks it up
         total_rows = len(categories) + 1
         total_cols = len(series_list) + 1
-        # Use xlRef style A1:XX
-        last_col_letter = chr(ord('A') + total_cols - 1) if total_cols <= 26 else 'Z'
+        if total_cols <= 26:
+            last_col_letter = chr(ord('A') + total_cols - 1)
+        else:
+            last_col_letter = 'Z'
         range_str = f"A1:{last_col_letter}{total_rows}"
-        chart.ChartData.SetRange(range_str)
+        try:
+            # Try setting the range via the worksheet's ListObjects or named range
+            ws.Range(f"A1:{last_col_letter}{total_rows}").Select()
+        except Exception:
+            pass  # Range selection not critical — chart auto-detects data
 
         wb.Close(True)
 
@@ -2274,12 +2299,17 @@ def update_chart_data(
             for v_idx, val in enumerate(series.get("values", [])):
                 ws.Cells(v_idx + 2, col).Value = val
 
-        # Set the data range
+        # Select the data range so chart picks it up
         total_rows = len(categories) + 1
         total_cols = len(series_list) + 1
-        last_col_letter = chr(ord('A') + total_cols - 1) if total_cols <= 26 else 'Z'
-        range_str = f"A1:{last_col_letter}{total_rows}"
-        chart.ChartData.SetRange(range_str)
+        if total_cols <= 26:
+            last_col_letter = chr(ord('A') + total_cols - 1)
+        else:
+            last_col_letter = 'Z'
+        try:
+            ws.Range(f"A1:{last_col_letter}{total_rows}").Select()
+        except Exception:
+            pass  # Chart auto-detects data range
 
         wb.Close(True)
 

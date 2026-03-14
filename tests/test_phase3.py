@@ -58,8 +58,8 @@ async def test():
 
     try:
         r = await call("add_slide", {"layout": "blank"})
-        assert "slide_index" in r, f"add_slide failed: {r}"
-        print(f"  [OK] add_slide (blank) -> index={r.get('slide_index')}")
+        assert "index" in r, f"add_slide failed: {r}"
+        print(f"  [OK] add_slide (blank) -> index={r.get('index')}")
     except Exception as e:
         print(f"  [FAIL] add_slide -> {e}")
         traceback.print_exc()
@@ -439,7 +439,7 @@ async def test():
     # -----------------------------------------------------------------------
     try:
         slide_r = await call("add_slide", {"layout": "title"})
-        title_slide_idx = slide_r["slide_index"]
+        title_slide_idx = slide_r["index"]
         r = await call("set_placeholder_text", {
             "slide_index": title_slide_idx,
             "placeholder_index": 1,

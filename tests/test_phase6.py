@@ -55,7 +55,7 @@ async def test():
         "slide_index": 1, "text": "Hello World",
         "left": 1, "top": 1, "width": 4, "height": 1,
     })
-    tb1_name = r.get("shape_name", "") if isinstance(r, dict) else ""
+    tb1_name = r.get("name", "") if isinstance(r, dict) else ""
     print(f"  add_textbox -> {r}  (name={tb1_name})")
 
     print("[Setup] Adding textbox 'Goodbye World' on slide 1 ...")
@@ -63,7 +63,7 @@ async def test():
         "slide_index": 1, "text": "Goodbye World",
         "left": 1, "top": 3, "width": 4, "height": 1,
     })
-    tb2_name = r.get("shape_name", "") if isinstance(r, dict) else ""
+    tb2_name = r.get("name", "") if isinstance(r, dict) else ""
     print(f"  add_textbox -> {r}  (name={tb2_name})")
 
     # Add a shape with text on slide 2
@@ -73,7 +73,7 @@ async def test():
         "left": 2, "top": 2, "width": 3, "height": 2,
         "text": "Slide2 Shape",
     })
-    shape2_name = r.get("shape_name", "") if isinstance(r, dict) else ""
+    shape2_name = r.get("name", "") if isinstance(r, dict) else ""
     print(f"  add_shape -> {r}  (name={shape2_name})")
 
     # ── 1. find_and_replace ────────────────────────────────────────────

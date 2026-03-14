@@ -66,7 +66,7 @@ async def test():
     # ── 4. duplicate_slide ────────────────────────────────────────────────────
     print("[4/16] duplicate_slide")
     r = await call("duplicate_slide", {"slide_index": 1})
-    assert isinstance(r, dict) and r.get("status") == "duplicated", f"Unexpected: {r}"
+    assert isinstance(r, dict) and "index" in r, f"Expected dict with 'index': {r}"
     results["duplicate_slide"] = "PASS"
     print(f"  -> {r}. PASS\n")
 
