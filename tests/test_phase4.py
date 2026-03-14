@@ -3,7 +3,11 @@ import asyncio
 import json
 import importlib.util
 import os
+import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(__file__))
+from fixtures import create_test_bmp, create_test_bmp_2, create_test_wav, create_test_avi, create_test_txt, cleanup_files
 
 _server_path = os.path.join(os.path.dirname(__file__), "..", "server.py")
 spec = importlib.util.spec_from_file_location("server", _server_path)
@@ -54,13 +58,49 @@ async def test():
     r = await call("add_slide", {"layout": "blank"})
     print(f"  add_slide 2: {r}")
 
-    # ── 1. insert_image — SKIP ────────────────────────────────────────
-    print("\n[1/14] insert_image — SKIP (no test image file available)")
-    results["insert_image"] = "SKIP"
+    # ── Fixture files ───────────────────────────────────────────────────
+    tmp = tempfile.gettempdir()
+    test_bmp = create_test_bmp(os.path.join(tmp, "phase4_test.bmp"))
+    test_bmp2 = create_test_bmp_2(os.path.join(tmp, "phase4_test2.bmp"))
+    test_wav = create_test_wav(os.path.join(tmp, "phase4_test.wav"))
+    test_avi = create_test_avi(os.path.join(tmp, "phase4_test.avi"))
+    test_txt = create_test_txt(os.path.join(tmp, "phase4_test.txt"))
+    image_shape_name = None
 
-    # ── 2. insert_image_from_url — SKIP ───────────────────────────────
-    print("[2/14] insert_image_from_url — SKIP (requires network)")
-    results["insert_image_from_url"] = "SKIP"
+    # ── 1. insert_image ─────────────────────────────────────────────
+    print("\n[1/14] insert_image ...")
+    try:
+        r = await call("insert_image", {
+            "slide_index": 1,
+            "image_path": test_bmp,
+            "left": 1, "top": 1,
+        })
+        print(f"  Result: {r}")
+        assert isinstance(r, dict) and "error" not in r, f"insert_image failed: {r}"
+        image_shape_name = r.get("name")
+        results["insert_image"] = "PASS"
+        print("  -> PASS")
+    except Exception as e:
+        results["insert_image"] = "FAIL"
+        print(f"  -> FAIL: {e}")
+
+    # ── 2. insert_image_from_url (use local file:// URL) ────────────
+    print("\n[2/14] insert_image_from_url ...")
+    try:
+        # Use a file:// URL pointing to the local test BMP
+        file_url = "file:///" + test_bmp2.replace("\\", "/")
+        r = await call("insert_image_from_url", {
+            "slide_index": 1,
+            "url": file_url,
+            "left": 4, "top": 1,
+        })
+        print(f"  Result: {r}")
+        assert isinstance(r, dict) and "error" not in r, f"insert_image_from_url failed: {r}"
+        results["insert_image_from_url"] = "PASS"
+        print("  -> PASS")
+    except Exception as e:
+        results["insert_image_from_url"] = "FAIL"
+        print(f"  -> FAIL: {e}")
 
     # ── 3. add_table ──────────────────────────────────────────────────
     print("\n[3/14] add_table ...")
@@ -209,25 +249,87 @@ async def test():
         results["update_chart_data"] = "FAIL"
         print(f"  -> FAIL: {e}")
 
-    # ── 10. insert_video — SKIP ───────────────────────────────────────
-    print("\n[10/14] insert_video — SKIP (no test video file available)")
-    results["insert_video"] = "SKIP"
+    # ── 10. insert_video ────────────────────────────────────────────────
+    print("\n[10/14] insert_video ...")
+    try:
+        r = await call("insert_video", {
+            "slide_index": 2,
+            "video_path": test_avi,
+            "left": 1, "top": 5, "width": 3, "height": 2,
+        })
+        print(f"  Result: {r}")
+        assert isinstance(r, dict) and "error" not in r, f"insert_video failed: {r}"
+        results["insert_video"] = "PASS"
+        print("  -> PASS")
+    except Exception as e:
+        results["insert_video"] = "FAIL"
+        print(f"  -> FAIL: {e}")
 
-    # ── 11. insert_audio — SKIP ───────────────────────────────────────
-    print("[11/14] insert_audio — SKIP (no test audio file available)")
-    results["insert_audio"] = "SKIP"
+    # ── 11. insert_audio ────────────────────────────────────────────────
+    print("\n[11/14] insert_audio ...")
+    try:
+        r = await call("insert_audio", {
+            "slide_index": 2,
+            "audio_path": test_wav,
+        })
+        print(f"  Result: {r}")
+        assert isinstance(r, dict) and "error" not in r, f"insert_audio failed: {r}"
+        results["insert_audio"] = "PASS"
+        print("  -> PASS")
+    except Exception as e:
+        results["insert_audio"] = "FAIL"
+        print(f"  -> FAIL: {e}")
 
-    # ── 12. insert_ole_object — SKIP ──────────────────────────────────
-    print("[12/14] insert_ole_object — SKIP (no test file available)")
-    results["insert_ole_object"] = "SKIP"
+    # ── 12. insert_ole_object ───────────────────────────────────────────
+    print("\n[12/14] insert_ole_object ...")
+    try:
+        r = await call("insert_ole_object", {
+            "slide_index": 2,
+            "file_path": test_txt,
+            "left": 5, "top": 5, "width": 2, "height": 1,
+            "as_icon": True,
+        })
+        print(f"  Result: {r}")
+        assert isinstance(r, dict) and "error" not in r, f"insert_ole_object failed: {r}"
+        results["insert_ole_object"] = "PASS"
+        print("  -> PASS")
+    except Exception as e:
+        results["insert_ole_object"] = "FAIL"
+        print(f"  -> FAIL: {e}")
 
-    # ── 13. crop_image — SKIP ─────────────────────────────────────────
-    print("[13/14] crop_image — SKIP (requires image on slide)")
-    results["crop_image"] = "SKIP"
+    # ── 13. crop_image ──────────────────────────────────────────────────
+    print("\n[13/14] crop_image ...")
+    try:
+        assert image_shape_name, "No image shape from insert_image"
+        r = await call("crop_image", {
+            "slide_index": 1,
+            "shape_name": image_shape_name,
+            "crop_left": 2, "crop_top": 2,
+        })
+        print(f"  Result: {r}")
+        assert isinstance(r, dict) and "error" not in r, f"crop_image failed: {r}"
+        results["crop_image"] = "PASS"
+        print("  -> PASS")
+    except Exception as e:
+        results["crop_image"] = "FAIL"
+        print(f"  -> FAIL: {e}")
 
-    # ── 14. replace_image — SKIP ──────────────────────────────────────
-    print("[14/14] replace_image — SKIP (requires image on slide)")
-    results["replace_image"] = "SKIP"
+    # ── 14. replace_image ───────────────────────────────────────────────
+    print("\n[14/14] replace_image ...")
+    try:
+        assert image_shape_name, "No image shape from insert_image"
+        r = await call("replace_image", {
+            "slide_index": 1,
+            "shape_name": image_shape_name,
+            "new_image_path": test_bmp2,
+        })
+        print(f"  Result: {r}")
+        assert isinstance(r, dict) and "error" not in r, f"replace_image failed: {r}"
+        results["replace_image"] = "PASS"
+        print("  -> PASS")
+    except Exception as e:
+        results["replace_image"] = "FAIL"
+        print(f"  -> FAIL: {e}")
 
     # ── Summary ───────────────────────────────────────────────────────
     passed = sum(1 for v in results.values() if v == "PASS")
@@ -249,6 +351,10 @@ async def test():
         print(f"  close_presentation: {r}")
     except Exception:
         print("  close_presentation: skipped (tool may not exist)")
+
+    # Clean up fixture files
+    cleanup_files(test_bmp, test_bmp2, test_wav, test_avi, test_txt)
+    print("[CLEANUP] Fixture files removed.")
 
     if failed > 0:
         raise SystemExit(f"\n{failed} test(s) FAILED.")

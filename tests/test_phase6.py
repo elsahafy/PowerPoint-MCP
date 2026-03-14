@@ -3,6 +3,7 @@ import asyncio
 import json
 import importlib.util
 import os
+import tempfile
 
 _server_path = os.path.join(os.path.dirname(__file__), "..", "server.py")
 spec = importlib.util.spec_from_file_location("server", _server_path)
@@ -107,13 +108,54 @@ async def test():
     else:
         results["get_presentation_outline"] = f"FAIL {r}"
 
-    # ── 4. merge_presentations — SKIP ──────────────────────────────────
-    print("\n[4/18] merge_presentations — SKIP (no external files)")
-    results["merge_presentations"] = "SKIP"
+    # ── 4. merge_presentations ──────────────────────────────────────────
+    print("\n[4/18] merge_presentations")
+    tmp_merge = os.path.join(tempfile.gettempdir(), "phase6_merge_source.pptx")
+    try:
+        # Save current pres as a source file, then merge it back (adds its slides)
+        r = await call("save_presentation_as", {"file_path": tmp_merge})
+        assert "error" not in r, f"Failed to save merge source: {r}"
+        slides_before = await call("get_slides")
+        count_before = len(slides_before) if isinstance(slides_before, list) else 0
+        r = await call("merge_presentations", {
+            "file_paths_json": json.dumps([tmp_merge]),
+        })
+        print(f"  -> {r}")
+        if isinstance(r, dict) and "error" not in r:
+            results["merge_presentations"] = "PASS"
+        else:
+            results["merge_presentations"] = f"FAIL {r}"
+    except Exception as e:
+        results["merge_presentations"] = f"FAIL {e}"
+        print(f"  Error: {e}")
+    finally:
+        if os.path.exists(tmp_merge):
+            try:
+                os.remove(tmp_merge)
+            except OSError:
+                pass
 
-    # ── 5. apply_template — SKIP ───────────────────────────────────────
-    print("\n[5/18] apply_template — SKIP (no template file)")
-    results["apply_template"] = "SKIP"
+    # ── 5. apply_template ────────────────────────────────────────────────
+    print("\n[5/18] apply_template")
+    tmp_template = os.path.join(tempfile.gettempdir(), "phase6_template.potx")
+    try:
+        r = await call("save_presentation_as", {"file_path": tmp_template, "format": "potx"})
+        assert "error" not in r, f"Failed to save template: {r}"
+        r = await call("apply_template", {"template_path": tmp_template})
+        print(f"  -> {r}")
+        if isinstance(r, dict) and "error" not in r:
+            results["apply_template"] = "PASS"
+        else:
+            results["apply_template"] = f"FAIL {r}"
+    except Exception as e:
+        results["apply_template"] = f"FAIL {e}"
+        print(f"  Error: {e}")
+    finally:
+        if os.path.exists(tmp_template):
+            try:
+                os.remove(tmp_template)
+            except OSError:
+                pass
 
     # ── 6. bulk_format_text ────────────────────────────────────────────
     print("\n[6/18] bulk_format_text")

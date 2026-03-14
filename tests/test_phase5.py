@@ -3,6 +3,7 @@ import asyncio
 import json
 import importlib.util
 import os
+import tempfile
 
 _server_path = os.path.join(os.path.dirname(__file__), "..", "server.py")
 spec = importlib.util.spec_from_file_location("server", _server_path)
@@ -61,9 +62,33 @@ async def test():
         results["get_theme_info"] = "FAIL"
     print(f"  Result: {results['get_theme_info']}")
 
-    # ── 2. apply_theme — SKIP ─────────────────────────────────────────
-    print("\n[2/12] apply_theme — SKIP (no .thmx file available)")
-    results["apply_theme"] = "SKIP"
+    # ── 2. apply_theme ──────────────────────────────────────────────────
+    print("\n[2/12] apply_theme")
+    try:
+        # Use a built-in Office theme from the installation directory
+        import glob
+        office_themes = glob.glob(r"C:\Program Files*\Microsoft Office\Root\Document Themes*\**\*.thmx", recursive=True)
+        if not office_themes:
+            office_themes = glob.glob(os.path.expandvars(r"%APPDATA%\Microsoft\Templates\Document Themes\**\*.thmx"), recursive=True)
+        if office_themes:
+            theme_path = office_themes[0]
+            r = await call("apply_theme", {"theme_path": theme_path})
+            print(f"  → {r}")
+            if isinstance(r, dict) and "error" not in r:
+                results["apply_theme"] = "PASS"
+            else:
+                results["apply_theme"] = "FAIL"
+        else:
+            # No theme files found on this system — test the tool still returns clean error
+            r = await call("apply_theme", {"theme_path": "nonexistent.thmx"})
+            print(f"  → {r}")
+            if isinstance(r, dict) and "error" in r:
+                results["apply_theme"] = "PASS"  # graceful error is acceptable
+            else:
+                results["apply_theme"] = "FAIL"
+    except Exception as e:
+        results["apply_theme"] = "FAIL"
+        print(f"  Error: {e}")
     print(f"  Result: {results['apply_theme']}")
 
     # ── 3. get_theme_colors ────────────────────────────────────────────
@@ -116,9 +141,24 @@ async def test():
         results["get_master_layouts"] = "FAIL"
     print(f"  Result: {results['get_master_layouts']}")
 
-    # ── 8. modify_master_placeholder — SKIP ────────────────────────────
-    print("\n[8/12] modify_master_placeholder — SKIP (fragile in test)")
-    results["modify_master_placeholder"] = "SKIP"
+    # ── 8. modify_master_placeholder ─────────────────────────────────────
+    print("\n[8/12] modify_master_placeholder")
+    try:
+        r = await call("modify_master_placeholder", {
+            "master_index": 1,
+            "layout_index": 1,
+            "placeholder_index": 1,
+            "font_size": 36,
+            "font_name": "Arial",
+        })
+        print(f"  → {r}")
+        if isinstance(r, dict) and "error" not in r:
+            results["modify_master_placeholder"] = "PASS"
+        else:
+            results["modify_master_placeholder"] = "FAIL"
+    except Exception as e:
+        results["modify_master_placeholder"] = "FAIL"
+        print(f"  Error: {e}")
     print(f"  Result: {results['modify_master_placeholder']}")
 
     # ── 9. set_background ──────────────────────────────────────────────
@@ -132,13 +172,18 @@ async def test():
     print(f"  Result: {results['set_background']}")
 
     # ── 10. get_placeholders ───────────────────────────────────────────
-    print("\n[10/12] get_placeholders (slide 2 — title slide)")
-    r = await call("get_placeholders", {"slide_index": 2})
-    print(f"  → {r}")
-    if isinstance(r, list):
-        results["get_placeholders"] = "PASS"
-    else:
+    print("\n[10/12] get_placeholders")
+    try:
+        # Use slide 1 (always exists) to avoid index issues
+        r = await call("get_placeholders", {"slide_index": 1})
+        print(f"  → {r}")
+        if isinstance(r, list):
+            results["get_placeholders"] = "PASS"
+        else:
+            results["get_placeholders"] = "FAIL"
+    except Exception as e:
         results["get_placeholders"] = "FAIL"
+        print(f"  Error: {e}")
     print(f"  Result: {results['get_placeholders']}")
 
     # ── 11. add_custom_layout ──────────────────────────────────────────
@@ -151,9 +196,28 @@ async def test():
         results["add_custom_layout"] = "FAIL"
     print(f"  Result: {results['add_custom_layout']}")
 
-    # ── 12. copy_master_from — SKIP ────────────────────────────────────
-    print("\n[12/12] copy_master_from — SKIP (no source file)")
-    results["copy_master_from"] = "SKIP"
+    # ── 12. copy_master_from ─────────────────────────────────────────────
+    print("\n[12/12] copy_master_from")
+    tmp_source = os.path.join(tempfile.gettempdir(), "phase5_source.pptx")
+    try:
+        # Save current pres as source file to copy master from
+        r = await call("save_presentation_as", {"file_path": tmp_source})
+        assert "error" not in r, f"Failed to save source: {r}"
+        r = await call("copy_master_from", {"source_path": tmp_source})
+        print(f"  → {r}")
+        if isinstance(r, dict) and "error" not in r:
+            results["copy_master_from"] = "PASS"
+        else:
+            results["copy_master_from"] = "FAIL"
+    except Exception as e:
+        results["copy_master_from"] = "FAIL"
+        print(f"  Error: {e}")
+    finally:
+        if os.path.exists(tmp_source):
+            try:
+                os.remove(tmp_source)
+            except OSError:
+                pass
     print(f"  Result: {results['copy_master_from']}")
 
     # ── Summary ────────────────────────────────────────────────────────

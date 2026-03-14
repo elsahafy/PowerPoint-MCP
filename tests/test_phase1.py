@@ -76,36 +76,58 @@ async def test():
         traceback.print_exc()
 
     # -----------------------------------------------------------------------
-    # 4. open_presentation  (SKIP — no test file available)
+    # 4. open_presentation
     # -----------------------------------------------------------------------
-    results["open_presentation"] = "SKIP"
-    print("  [SKIP] open_presentation  -> no test file available")
+    temp_pptx = os.path.join(temp_dir, "pptx_test_phase1.pptx")
+    try:
+        # First save current pres so we have a file to open
+        r = await call("save_presentation_as", {"file_path": temp_pptx})
+        assert "status" in r, f"save_presentation_as failed: {r}"
+        # Close it
+        await call("close_presentation", {"save": False})
+        # Now open it
+        r = await call("open_presentation", {"file_path": temp_pptx})
+        assert "status" in r and "error" not in r, f"open_presentation failed: {r}"
+        results["open_presentation"] = "PASS"
+        print(f"  [PASS] open_presentation  -> opened {temp_pptx}")
+    except Exception as e:
+        results["open_presentation"] = "FAIL"
+        print(f"  [FAIL] open_presentation  -> {e}")
+        traceback.print_exc()
 
     # -----------------------------------------------------------------------
-    # 5. save_presentation  (SKIP — new pres has no file path yet)
+    # 5. save_presentation (now the pres has a file path from open)
     # -----------------------------------------------------------------------
-    results["save_presentation"] = "SKIP"
-    print("  [SKIP] save_presentation  -> new presentation has no file path")
+    try:
+        r = await call("save_presentation")
+        assert "status" in r and "error" not in r, f"save_presentation failed: {r}"
+        results["save_presentation"] = "PASS"
+        print(f"  [PASS] save_presentation  -> saved")
+    except Exception as e:
+        results["save_presentation"] = "FAIL"
+        print(f"  [FAIL] save_presentation  -> {e}")
+        traceback.print_exc()
 
     # -----------------------------------------------------------------------
     # 6. save_presentation_as
     # -----------------------------------------------------------------------
-    temp_pptx = os.path.join(temp_dir, "pptx_test_phase1.pptx")
+    temp_pptx2 = os.path.join(temp_dir, "pptx_test_phase1_copy.pptx")
     try:
-        r = await call("save_presentation_as", {"file_path": temp_pptx})
+        r = await call("save_presentation_as", {"file_path": temp_pptx2})
         assert "status" in r, f"Missing 'status': {r}"
         results["save_presentation_as"] = "PASS"
-        print(f"  [PASS] save_presentation_as -> {temp_pptx}")
+        print(f"  [PASS] save_presentation_as -> {temp_pptx2}")
     except Exception as e:
         results["save_presentation_as"] = "FAIL"
         print(f"  [FAIL] save_presentation_as -> {e}")
         traceback.print_exc()
     finally:
-        if os.path.exists(temp_pptx):
-            try:
-                os.remove(temp_pptx)
-            except OSError:
-                pass
+        for f in [temp_pptx2]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
 
     # -----------------------------------------------------------------------
     # 7. close_presentation
@@ -282,6 +304,14 @@ async def test():
             await call("close_presentation", {"save": False})
         except Exception:
             break
+
+    # Remove temp files
+    for f in [temp_pptx]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
     print("Done.\n")
 
