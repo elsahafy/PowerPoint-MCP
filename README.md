@@ -213,8 +213,10 @@ Add to your MCP settings:
 ## Architecture
 
 ```
-server.py (single file, ~4,300 lines)
-├── Constants & Maps (layouts, save formats, shapes, transitions, animations)
+server.py (single file, ~4,800 lines)
+├── Constants & Maps (layouts, save formats, 57 shapes, 21 transitions, 15 animations)
+├── Error Taxonomy (PPTError, ValidationError, NotFoundError, BoundsError, COMError, ReadOnlyError)
+├── Response Envelope (_ok, _ok_list, _err) & Validation Helpers
 ├── Utility Helpers (_parse_color, _inches_to_points, etc.)
 ├── COM Helpers (get_app, get_pres, get_slide, get_shape)
 ├── Data Converters (shape_to_dict, slide_to_dict)
@@ -224,6 +226,25 @@ server.py (single file, ~4,300 lines)
 
 All communication with PowerPoint happens through Windows COM via `win32com.client`. The server launches or connects to a running PowerPoint instance automatically.
 
+## Error Handling
+
+All tools return structured error responses with machine-readable error codes:
+
+| Code | Class | Description |
+|------|-------|-------------|
+| `VALIDATION_ERROR` | `ValidationError` | Invalid input (bad color, zero dimensions, wrong JSON type) |
+| `NOT_FOUND` | `NotFoundError` | Missing file, shape, or presentation |
+| `OUT_OF_BOUNDS` | `BoundsError` | Slide/shape/table cell index out of range |
+| `COM_ERROR` | `COMError` | PowerPoint COM/HRESULT failure |
+| `READ_ONLY` | `ReadOnlyError` | Mutation attempted on read-only presentation |
+
+Error response format:
+```json
+{"error": "Slide index 99 out of range (1..5).", "code": "OUT_OF_BOUNDS"}
+```
+
+All mutating tools include read-only guards. Input validation catches issues before COM calls (dimensions > 0, valid colors, file existence, JSON schema).
+
 ## Key Design Decisions
 
 - **Single file** — No modules to manage, easy to deploy and debug.
@@ -231,6 +252,29 @@ All communication with PowerPoint happens through Windows COM via `win32com.clie
 - **BGR color handling** — `_parse_color()` accepts `#RRGGBB` or `R,G,B` and converts to COM's BGR format.
 - **MsoTriState** — COM booleans use `-1` (True) and `0` (False), never Python bools.
 - **JSON in, JSON out** — All tools return `json.dumps(...)`. Bulk operations accept JSON string parameters.
+- **Structured errors** — All errors include a `code` field for programmatic handling. COM HRESULT codes are translated to human-readable messages.
+- **Resource safety** — Chart workbook handles use `try/finally` to prevent leaks. `reorder_slides` tracks by SlideID to avoid index drift.
+
+## Testing
+
+9 test suites covering all 105 tools:
+
+```bash
+# Run all phase tests (requires PowerPoint running on Windows)
+python tests/test_phase1.py   # 14 tools — App & presentation management
+python tests/test_phase2.py   # 16 tools — Slide operations
+python tests/test_phase3.py   # 18 tools — Text & shapes
+python tests/test_phase4.py   # 14 tools — Rich media
+python tests/test_phase5.py   # 12 tools — Design & themes
+python tests/test_phase6.py   # 18 tools — Advanced operations
+python tests/test_phase7.py   # 13 tools — Analysis & export
+
+# Negative tests (error codes, validation, bounds checking)
+python tests/test_negative.py  # 22 tests
+
+# End-to-end workflows (build pipeline, merge, reorder, unicode, etc.)
+python tests/test_e2e.py       # 8 workflows
+```
 
 ## Contributing
 

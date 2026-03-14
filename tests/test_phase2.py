@@ -45,9 +45,10 @@ async def test():
     # ── 1. get_slides ─────────────────────────────────────────────────────────
     print("[1/16] get_slides")
     r = await call("get_slides")
-    assert isinstance(r, list), f"Expected list, got {type(r)}: {r}"
+    assert isinstance(r, dict) and r.get("status") == "ok", f"Expected envelope dict, got {type(r)}: {r}"
+    slides_list = r["slides"]
     results["get_slides"] = "PASS"
-    print(f"  -> {len(r)} slide(s) returned. PASS\n")
+    print(f"  -> {r['count']} slide(s) returned. PASS\n")
 
     # ── 2. get_slide_info ─────────────────────────────────────────────────────
     print("[2/16] get_slide_info")
@@ -74,7 +75,7 @@ async def test():
     print("[5/16] delete_slide")
     # Get current slide count to delete the last one
     slides = await call("get_slides")
-    last_idx = len(slides)
+    last_idx = slides["count"]
     r = await call("delete_slide", {"slide_index": last_idx})
     assert isinstance(r, dict) and r.get("status") == "deleted", f"Unexpected: {r}"
     results["delete_slide"] = "PASS"
@@ -86,7 +87,7 @@ async def test():
     await call("add_slide", {"layout": "blank"})
     await call("add_slide", {"layout": "blank"})
     slides = await call("get_slides")
-    total = len(slides)
+    total = slides["count"]
     print(f"  -> {total} slides before move")
     r = await call("move_slide", {"slide_index": 1, "new_index": total})
     assert isinstance(r, dict) and r.get("status") == "moved", f"Unexpected: {r}"
@@ -139,14 +140,14 @@ async def test():
         {"layout": "blank"},
     ])
     r = await call("bulk_add_slides", {"slides_json": slides_spec})
-    assert isinstance(r, list), f"Expected list of results: {r}"
+    assert isinstance(r, dict) and r.get("status") == "ok", f"Expected envelope dict: {r}"
     results["bulk_add_slides"] = "PASS"
-    print(f"  -> added {len(r)} slides. PASS\n")
+    print(f"  -> added {r['count']} slides. PASS\n")
 
     # ── 13. reorder_slides ────────────────────────────────────────────────────
     print("[13/16] reorder_slides")
     slides = await call("get_slides")
-    count = len(slides)
+    count = slides["count"]
     order = list(range(count, 0, -1))  # reverse order
     r = await call("reorder_slides", {"order_json": json.dumps(order)})
     assert isinstance(r, dict) and "status" in r, f"Expected dict with 'status': {r}"
@@ -174,9 +175,9 @@ async def test():
         {"slide_index": 2, "effect": "push", "duration": 0.5},
     ])
     r = await call("bulk_set_transitions", {"settings_json": transitions_spec})
-    assert isinstance(r, list), f"Expected list of results: {r}"
+    assert isinstance(r, dict) and r.get("status") == "ok", f"Expected envelope dict: {r}"
     results["bulk_set_transitions"] = "PASS"
-    print(f"  -> applied transitions to {len(r)} slides. PASS\n")
+    print(f"  -> applied transitions to {r['count']} slides. PASS\n")
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print("=" * 60)

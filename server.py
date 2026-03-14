@@ -6,6 +6,7 @@ Run:     python server.py
 """
 import json
 import os
+import re
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("PowerPoint")
@@ -25,6 +26,11 @@ LAYOUT_MAP = {
     "title_only": 11,
     "content_caption": 7,
     "picture_caption": 8,
+    "object": 16,
+    "vertical_title_text": 9,
+    "vertical_text": 10,
+    "custom": 13,
+    "two_objects": 29,
 }
 
 SAVE_FORMAT_MAP = {
@@ -41,19 +47,65 @@ SAVE_FORMAT_MAP = {
 }
 
 AUTOSHAPE_MAP = {
+    # Basic shapes
     "rectangle": 1,
     "rounded_rectangle": 5,
     "oval": 9,
     "diamond": 4,
     "triangle": 7,
+    "right_triangle": 6,
+    "parallelogram": 2,
+    "trapezoid": 3,
+    "pentagon": 56,
+    "hexagon": 10,
+    "octagon": 11,
+    "cross": 12,
+    "cube": 14,
+    "can": 13,
+    "donut": 18,
+    "no_symbol": 19,
+    # Arrows
     "right_arrow": 33,
     "left_arrow": 34,
     "up_arrow": 35,
     "down_arrow": 36,
-    "star_5": 92,
+    "left_right_arrow": 37,
+    "up_down_arrow": 38,
+    "bent_arrow": 41,
+    "u_turn_arrow": 42,
+    "chevron": 52,
+    "notched_right_arrow": 50,
+    # Stars and banners
     "star_4": 91,
+    "star_5": 92,
+    "star_6": 93,
+    "star_8": 94,
+    "star_16": 95,
+    "star_24": 96,
+    "star_32": 97,
+    "explosion_1": 89,
+    "explosion_2": 90,
+    "ribbon_up": 97,
+    "ribbon_down": 98,
+    # Flowchart
+    "flowchart_process": 109,
+    "flowchart_decision": 110,
+    "flowchart_data": 111,
+    "flowchart_document": 114,
+    "flowchart_terminator": 116,
+    "flowchart_preparation": 117,
+    "flowchart_manual_input": 118,
+    "flowchart_connector": 120,
+    # Special
     "heart": 21,
     "lightning": 22,
+    "sun": 23,
+    "moon": 24,
+    "smiley_face": 17,
+    "brace_left": 87,
+    "brace_right": 88,
+    "bracket_left": 85,
+    "bracket_right": 86,
     "callout_1": 41,
     "callout_2": 42,
     "cloud": 179,
@@ -69,6 +121,18 @@ TRANSITION_MAP = {
     "cut": 257,
     "dissolve": 1537,
     "checkerboard": 1025,
+    "cover": 1284,
+    "uncover": 1542,
+    "random_bars": 769,
+    "blinds": 513,
+    "clock": 3849,
+    "ripple": 3850,
+    "honeycomb": 3851,
+    "glitter": 3852,
+    "vortex": 3853,
+    "shred": 3854,
+    "flash": 3855,
+    "fly_through": 3861,
 }
 
 ANIMATION_MAP = {
@@ -79,6 +143,14 @@ ANIMATION_MAP = {
     "split": 13,
     "wheel": 21,
     "grow_shrink": 50,
+    "bounce": 26,
+    "swivel": 15,
+    "spiral_in": 55,
+    "expand": 50,
+    "float_up": 42,
+    "float_down": 36,
+    "zoom": 53,
+    "rise_up": 37,
 }
 
 
@@ -164,6 +236,196 @@ def _parse_color(color_str: str) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ERROR TAXONOMY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PPTError(Exception):
+    """Base error for PowerPoint MCP operations."""
+    code = "PPT_ERROR"
+
+
+class ValidationError(PPTError):
+    """Invalid input from the caller."""
+    code = "VALIDATION_ERROR"
+
+
+class NotFoundError(PPTError):
+    """Requested resource (file, shape, presentation) does not exist."""
+    code = "NOT_FOUND"
+
+
+class BoundsError(PPTError):
+    """Index out of valid range."""
+    code = "OUT_OF_BOUNDS"
+
+
+class COMError(PPTError):
+    """COM / HRESULT failure from PowerPoint."""
+    code = "COM_ERROR"
+
+
+class ReadOnlyError(PPTError):
+    """Attempted mutation on a read-only presentation."""
+    code = "READ_ONLY"
+
+
+# Common HRESULT → human-readable messages
+_HRESULT_MAP = {
+    -2147352567: "Member not found (method/property does not exist on this object)",
+    -2147024894: "File not found",
+    -2147024891: "Access denied",
+    -2147352565: "Type mismatch",
+    -2146827284: "Method or property not supported on this shape type",
+    -2147188160: "PowerPoint is busy or modal dialog is open",
+    -2004287453: "Invalid parameter or enum value",
+    -2147467259: "Unspecified COM error",
+    -2147024882: "Out of memory",
+    -2147418113: "Call was rejected by callee (COM server busy)",
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RESPONSE ENVELOPE & VALIDATION HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _ok(data: dict) -> str:
+    """Wrap a successful result dict with status='ok'."""
+    if "status" not in data:
+        data["status"] = "ok"
+    return json.dumps(data, indent=2)
+
+
+def _ok_list(items: list, label: str = "items") -> str:
+    """Wrap a list result in {status, count, <label>}."""
+    return json.dumps({
+        "status": "ok",
+        "count": len(items),
+        label: items,
+    }, indent=2)
+
+
+def _err(exc: Exception) -> str:
+    """Wrap an exception into a structured error response."""
+    code = "UNKNOWN_ERROR"
+    message = str(exc)
+
+    if isinstance(exc, PPTError):
+        code = exc.code
+    elif isinstance(exc, json.JSONDecodeError):
+        code = "VALIDATION_ERROR"
+        message = f"Invalid JSON: {exc}"
+    else:
+        # Check for COM HRESULT codes
+        hresult = getattr(exc, "hresult", None)
+        if hresult is None:
+            # Try to extract from pywintypes.com_error args
+            args = getattr(exc, "args", ())
+            if args and isinstance(args[0], int):
+                hresult = args[0]
+        if hresult and hresult in _HRESULT_MAP:
+            code = "COM_ERROR"
+            message = f"{_HRESULT_MAP[hresult]} (HRESULT {hresult}): {exc}"
+        elif "com_error" in type(exc).__name__.lower():
+            code = "COM_ERROR"
+
+    return json.dumps({"error": message, "code": code}, indent=2)
+
+
+def _validate_positive_dimensions(**kwargs) -> None:
+    """Raise ValidationError if any dimension is <= 0."""
+    for name, val in kwargs.items():
+        if val is not None and val <= 0:
+            raise ValidationError(f"'{name}' must be > 0, got {val}")
+
+
+def _validate_file_exists(path: str) -> str:
+    """Return absolute path or raise NotFoundError."""
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        raise NotFoundError(f"File not found: {abs_path}")
+    return abs_path
+
+
+def _validate_json_list(raw: str, label: str) -> list:
+    """Parse JSON and assert it is a list."""
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise ValidationError(f"'{label}' must be a JSON array, got {type(data).__name__}")
+    return data
+
+
+def _validate_json_dict(raw: str, label: str, required_keys: tuple = ()) -> dict:
+    """Parse JSON and assert it is a dict with required keys."""
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValidationError(f"'{label}' must be a JSON object, got {type(data).__name__}")
+    for key in required_keys:
+        if key not in data:
+            raise ValidationError(f"'{label}' missing required key '{key}'")
+    return data
+
+
+def _validate_table_bounds(table, row: int, col: int) -> None:
+    """Raise BoundsError if row/col exceed table dimensions."""
+    max_rows = table.Rows.Count
+    max_cols = table.Columns.Count
+    if row < 1 or row > max_rows:
+        raise BoundsError(f"Row {row} out of range (1..{max_rows})")
+    if col < 1 or col > max_cols:
+        raise BoundsError(f"Column {col} out of range (1..{max_cols})")
+
+
+def _validate_color(color_str: str) -> None:
+    """Validate color format before parsing."""
+    if not color_str or not color_str.strip():
+        raise ValidationError("Color string cannot be empty")
+    s = color_str.strip()
+    if s.startswith("#"):
+        hex_part = s.lstrip("#")
+        if len(hex_part) != 6 or not all(c in "0123456789abcdefABCDEF" for c in hex_part):
+            raise ValidationError(f"Invalid hex color: '{color_str}'. Expected '#RRGGBB' with valid hex digits.")
+    elif "," in s:
+        parts = [p.strip() for p in s.split(",")]
+        if len(parts) != 3:
+            raise ValidationError(f"Invalid RGB color: '{color_str}'. Expected 'R,G,B' with 3 components.")
+        for i, p in enumerate(parts):
+            try:
+                v = int(p)
+            except ValueError:
+                raise ValidationError(f"Invalid RGB component '{p}' in color '{color_str}'.")
+            if v < 0 or v > 255:
+                raise ValidationError(f"RGB component {v} out of range (0..255) in color '{color_str}'.")
+    else:
+        raise ValidationError(f"Unrecognised color format: '{color_str}'. Use '#RRGGBB' or 'R,G,B'.")
+
+
+def _validate_url(url: str) -> None:
+    """Validate URL has a protocol prefix."""
+    if not url or not url.strip():
+        raise ValidationError("URL cannot be empty")
+    if not re.match(r'^(https?|file)://', url, re.IGNORECASE):
+        raise ValidationError(f"URL must start with http://, https://, or file://, got '{url}'")
+
+
+def _validate_placeholder_index(slide, idx: int) -> None:
+    """Raise BoundsError if placeholder index is out of range."""
+    count = slide.Shapes.Placeholders.Count
+    if idx < 1 or idx > count:
+        raise BoundsError(f"Placeholder index {idx} out of range (1..{count})")
+
+
+def _require_writable(pres) -> None:
+    """Raise ReadOnlyError if the presentation is read-only."""
+    try:
+        if pres.ReadOnly:
+            raise ReadOnlyError("Presentation is read-only. Open it with read_only=False to modify.")
+    except ReadOnlyError:
+        raise
+    except Exception:
+        pass  # ReadOnly property may not be available; assume writable
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CORE COM HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -199,7 +461,7 @@ def get_slide(pres, slide_index: int):
     """Return a slide by 1-based index with bounds checking."""
     count = pres.Slides.Count
     if slide_index < 1 or slide_index > count:
-        raise IndexError(f"Slide index {slide_index} out of range (1..{count}).")
+        raise BoundsError(f"Slide index {slide_index} out of range (1..{count}).")
     return pres.Slides(slide_index)
 
 
@@ -212,7 +474,7 @@ def get_shape(slide, shape_id):
         idx = int(shape_id)
         count = slide.Shapes.Count
         if idx < 1 or idx > count:
-            raise IndexError(f"Shape index {idx} out of range (1..{count}).")
+            raise BoundsError(f"Shape index {idx} out of range (1..{count}).")
         return slide.Shapes(idx)
     except (ValueError, TypeError):
         pass
@@ -223,7 +485,7 @@ def get_shape(slide, shape_id):
         if slide.Shapes(i).Name == name:
             return slide.Shapes(i)
 
-    raise KeyError(f"Shape '{shape_id}' not found on slide.")
+    raise NotFoundError(f"Shape '{shape_id}' not found on slide.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -300,7 +562,7 @@ def launch_powerpoint() -> str:
             "visible": bool(app.Visible),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +587,7 @@ def get_app_info() -> str:
             "active_presentation": active_name,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +602,7 @@ def new_presentation(template_path: str = "") -> str:
         if template_path:
             abs_path = os.path.abspath(template_path)
             if not os.path.isfile(abs_path):
-                return json.dumps({"error": f"Template not found: {abs_path}"}, indent=2)
+                return _err(NotFoundError(f"Template not found: {abs_path}"))
             pres = app.Presentations.Open(abs_path)
         else:
             pres = app.Presentations.Add()
@@ -355,7 +617,7 @@ def new_presentation(template_path: str = "") -> str:
             "slide_count": pres.Slides.Count,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +631,7 @@ def open_presentation(file_path: str, read_only: bool = False) -> str:
         app = get_app(require_presentation=False)
         abs_path = os.path.abspath(file_path)
         if not os.path.isfile(abs_path):
-            return json.dumps({"error": f"File not found: {abs_path}"}, indent=2)
+            return _err(NotFoundError(f"File not found: {abs_path}"))
 
         pres = app.Presentations.Open(abs_path, ReadOnly=read_only)
         return json.dumps({
@@ -380,7 +642,7 @@ def open_presentation(file_path: str, read_only: bool = False) -> str:
             "read_only": bool(pres.ReadOnly),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +662,7 @@ def save_presentation() -> str:
             "path": pres.FullName,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -417,9 +679,7 @@ def save_presentation_as(file_path: str, format: str = "pptx") -> str:
         fmt_lower = format.lower()
         format_id = SAVE_FORMAT_MAP.get(fmt_lower)
         if format_id is None:
-            return json.dumps({
-                "error": f"Unknown format '{format}'. Supported: {', '.join(SAVE_FORMAT_MAP.keys())}"
-            }, indent=2)
+            return _err(ValidationError(f"Unknown format '{format}'. Supported: {', '.join(SAVE_FORMAT_MAP.keys())}"))
 
         pres.SaveAs(abs_path, format_id)
         return json.dumps({
@@ -428,7 +688,7 @@ def save_presentation_as(file_path: str, format: str = "pptx") -> str:
             "format": fmt_lower,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -442,18 +702,19 @@ def close_presentation(save: bool = True) -> str:
         app = get_app()
         pres = get_pres(app)
         name = pres.Name
+        save_warning = ""
         if save:
             try:
                 pres.Save()
-            except Exception:
-                pass  # May fail if never saved to disk; that's OK
+            except Exception as save_err:
+                save_warning = f"Save failed (file may not have been saved to disk): {save_err}"
         pres.Close()
-        return json.dumps({
-            "status": "closed",
-            "name": name,
-        }, indent=2)
+        result = {"status": "closed", "name": name}
+        if save_warning:
+            result["warning"] = save_warning
+        return json.dumps(result, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -474,9 +735,9 @@ def list_presentations() -> str:
                 "slide_count": p.Slides.Count,
                 "read_only": bool(p.ReadOnly),
             })
-        return json.dumps(results, indent=2)
+        return _ok_list(results, "presentations")
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +767,7 @@ def switch_presentation(name_or_index: str) -> str:
                     break
 
         if pres is None:
-            return json.dumps({"error": f"Presentation '{name_or_index}' not found."}, indent=2)
+            return _err(NotFoundError(f"Presentation '{name_or_index}' not found."))
 
         # Activate by bringing its first window to the front
         pres.Windows(1).Activate()
@@ -515,7 +776,7 @@ def switch_presentation(name_or_index: str) -> str:
             "name": pres.Name,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +810,7 @@ def get_presentation_info() -> str:
             "metadata": metadata,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -558,27 +819,28 @@ def get_presentation_info() -> str:
 
 @mcp.tool()
 def set_presentation_properties(properties_json: str) -> str:
-    """Set built-in document properties (Title, Author, Subject, etc.) from a JSON string."""
+    """Set built-in document properties (Title, Author, Subject, etc.) from a JSON object string."""
     try:
         app = get_app()
         pres = get_pres(app)
-        props = json.loads(properties_json)
+        _require_writable(pres)
+        props = _validate_json_dict(properties_json, "properties_json")
         updated = []
         for key, value in props.items():
             try:
                 pres.BuiltInDocumentProperties(key).Value = str(value)
                 updated.append(key)
             except Exception as prop_err:
-                return json.dumps({"error": f"Failed to set '{key}': {prop_err}"}, indent=2)
+                return _err(PPTError(f"Failed to set property '{key}': {prop_err}"))
 
         return json.dumps({
             "status": "updated",
             "properties_set": updated,
         }, indent=2)
     except json.JSONDecodeError as je:
-        return json.dumps({"error": f"Invalid JSON: {je}"}, indent=2)
+        return _err(je)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -593,16 +855,14 @@ def export_presentation(output_path: str, format: str = "pdf") -> str:
         pres = get_pres(app)
 
         if pres.Slides.Count == 0:
-            return json.dumps({"error": "Cannot export — presentation has no slides."}, indent=2)
+            return _err(ValidationError("Cannot export — presentation has no slides."))
 
         abs_path = os.path.abspath(output_path)
         fmt_lower = format.lower()
 
         format_id = SAVE_FORMAT_MAP.get(fmt_lower)
         if format_id is None:
-            return json.dumps({
-                "error": f"Unknown format '{format}'. Supported: {', '.join(SAVE_FORMAT_MAP.keys())}"
-            }, indent=2)
+            return _err(ValidationError(f"Unknown format '{format}'. Supported: {', '.join(SAVE_FORMAT_MAP.keys())}"))
 
         pres.SaveAs(abs_path, format_id)
         return json.dumps({
@@ -611,7 +871,7 @@ def export_presentation(output_path: str, format: str = "pdf") -> str:
             "format": fmt_lower,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -624,10 +884,12 @@ def set_slide_size(
     height_inches: float = 7.5,
     orientation: str = "landscape",
 ) -> str:
-    """Set slide dimensions in inches and orientation."""
+    """Set slide dimensions in inches and orientation ('landscape' or 'portrait'). width/height must be > 0."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        _validate_positive_dimensions(width_inches=width_inches, height_inches=height_inches)
         pres.PageSetup.SlideWidth = _inches_to_points(width_inches)
         pres.PageSetup.SlideHeight = _inches_to_points(height_inches)
 
@@ -645,7 +907,7 @@ def set_slide_size(
             "orientation": orientation.lower(),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -679,9 +941,9 @@ def get_slide_masters() -> str:
                 "layouts": layouts,
             })
 
-        return json.dumps(masters, indent=2)
+        return _ok_list(masters, "masters")
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -702,9 +964,9 @@ def get_slides() -> str:
         slides = []
         for i in range(1, pres.Slides.Count + 1):
             slides.append(slide_to_dict(pres.Slides(i)))
-        return json.dumps(slides, indent=2)
+        return _ok_list(slides, "slides")
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -759,7 +1021,7 @@ def get_slide_info(slide_index: int) -> str:
 
         return json.dumps(info, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -768,23 +1030,22 @@ def get_slide_info(slide_index: int) -> str:
 
 @mcp.tool()
 def add_slide(layout: str = "blank", index: int = 0) -> str:
-    """Add a new slide with a specified layout. index=0 means append at the end."""
+    """Add a new slide with a specified layout (see LAYOUT_MAP). index=0 means append at the end."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
 
         layout_enum = LAYOUT_MAP.get(layout.lower())
         if layout_enum is None:
-            return json.dumps({
-                "error": f"Unknown layout '{layout}'. Supported: {', '.join(LAYOUT_MAP.keys())}"
-            }, indent=2)
+            return _err(ValidationError(f"Unknown layout '{layout}'. Supported: {', '.join(LAYOUT_MAP.keys())}"))
 
         insert_idx = index if index > 0 else pres.Slides.Count + 1
         new_slide = pres.Slides.Add(insert_idx, layout_enum)
 
         return json.dumps(slide_to_dict(new_slide), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -797,12 +1058,13 @@ def duplicate_slide(slide_index: int) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         dup_range = slide.Duplicate()
         new_slide = dup_range(1)
         return json.dumps(slide_to_dict(new_slide), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -815,6 +1077,7 @@ def delete_slide(slide_index: int) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         slide.Delete()
         return json.dumps({
@@ -822,7 +1085,7 @@ def delete_slide(slide_index: int) -> str:
             "slide_index": slide_index,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +1098,7 @@ def move_slide(slide_index: int, new_index: int) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         get_slide(pres, slide_index)  # validate index
         pres.Slides(slide_index).MoveTo(new_index)
         return json.dumps({
@@ -843,7 +1107,7 @@ def move_slide(slide_index: int, new_index: int) -> str:
             "to": new_index,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +1120,7 @@ def copy_slide(source_index: int, target_pres_name: str = "", target_index: int 
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         get_slide(pres, source_index)  # validate
 
         if not target_pres_name:
@@ -877,7 +1142,7 @@ def copy_slide(source_index: int, target_pres_name: str = "", target_index: int 
                     target_pres = app.Presentations(i)
                     break
             if target_pres is None:
-                return json.dumps({"error": f"Target presentation '{target_pres_name}' not found."}, indent=2)
+                return _err(NotFoundError(f"Target presentation '{target_pres_name}' not found."))
 
             insert_at = target_index if target_index > 0 else target_pres.Slides.Count + 1
             target_pres.Slides.InsertFromFile(pres.FullName, insert_at - 1, source_index, source_index)
@@ -887,7 +1152,7 @@ def copy_slide(source_index: int, target_pres_name: str = "", target_index: int 
                 "new_slide_index": insert_at,
             }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -911,7 +1176,7 @@ def get_slide_notes(slide_index: int) -> str:
             "notes": notes,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +1189,7 @@ def set_slide_notes(slide_index: int, notes: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         slide.NotesPage.Shapes.Placeholders(2).TextFrame.TextRange.Text = notes
         return json.dumps({
@@ -931,7 +1197,7 @@ def set_slide_notes(slide_index: int, notes: str) -> str:
             "slide_index": slide_index,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -940,17 +1206,16 @@ def set_slide_notes(slide_index: int, notes: str) -> str:
 
 @mcp.tool()
 def set_slide_layout(slide_index: int, layout: str) -> str:
-    """Change the layout of an existing slide."""
+    """Change the layout of an existing slide. layout must be a key from LAYOUT_MAP."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
 
         layout_enum = LAYOUT_MAP.get(layout.lower())
         if layout_enum is None:
-            return json.dumps({
-                "error": f"Unknown layout '{layout}'. Supported: {', '.join(LAYOUT_MAP.keys())}"
-            }, indent=2)
+            return _err(ValidationError(f"Unknown layout '{layout}'. Supported: {', '.join(LAYOUT_MAP.keys())}"))
 
         slide.Layout = layout_enum
         return json.dumps({
@@ -959,7 +1224,7 @@ def set_slide_layout(slide_index: int, layout: str) -> str:
             "layout": layout,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -973,10 +1238,11 @@ def set_slide_transition(
     duration: float = 1.0,
     advance_time: float = 0,
 ) -> str:
-    """Set the transition effect for a slide."""
+    """Set the transition effect for a slide. effect must be a key from TRANSITION_MAP. duration in seconds."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
 
         trans = slide.SlideShowTransition
@@ -995,7 +1261,7 @@ def set_slide_transition(
             "advance_time": advance_time,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1008,7 +1274,8 @@ def bulk_add_slides(slides_json: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
-        slides_spec = json.loads(slides_json)
+        _require_writable(pres)
+        slides_spec = _validate_json_list(slides_json, "slides_json")
         results = []
 
         for spec in slides_spec:
@@ -1024,11 +1291,11 @@ def bulk_add_slides(slides_json: str) -> str:
             new_slide = pres.Slides.Add(insert_idx, layout_enum)
             results.append(slide_to_dict(new_slide))
 
-        return json.dumps(results, indent=2)
+        return _ok_list(results, "slides")
     except json.JSONDecodeError as je:
-        return json.dumps({"error": f"Invalid JSON: {je}"}, indent=2)
+        return _err(je)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1042,27 +1309,35 @@ def reorder_slides(order_json: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
-        new_order = json.loads(order_json)
+        _require_writable(pres)
+        new_order = _validate_json_list(order_json, "order_json")
 
         # Validate all indices
         count = pres.Slides.Count
         for idx in new_order:
-            if idx < 1 or idx > count:
-                return json.dumps({"error": f"Slide index {idx} out of range (1..{count})."}, indent=2)
+            if not isinstance(idx, int) or idx < 1 or idx > count:
+                raise BoundsError(f"Slide index {idx} out of range (1..{count}).")
 
-        # Apply moves: place each slide at its target position
-        for target_pos, slide_idx in enumerate(new_order, start=1):
-            # Find current position of the slide with original SlideID
-            pres.Slides(slide_idx).MoveTo(target_pos)
+        # Capture SlideIDs in the desired order BEFORE any moves
+        desired_ids = [pres.Slides(idx).SlideID for idx in new_order]
 
-        return json.dumps({
+        # Move each slide to its target position, finding by SlideID
+        for target_pos, sid in enumerate(desired_ids, start=1):
+            # Find current position of slide with this SlideID
+            for i in range(1, pres.Slides.Count + 1):
+                if pres.Slides(i).SlideID == sid:
+                    if i != target_pos:
+                        pres.Slides(i).MoveTo(target_pos)
+                    break
+
+        return _ok({
             "status": "reordered",
             "new_order": new_order,
-        }, indent=2)
-    except json.JSONDecodeError as je:
-        return json.dumps({"error": f"Invalid JSON: {je}"}, indent=2)
+        })
+    except (PPTError, json.JSONDecodeError) as e:
+        return _err(e)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1087,7 +1362,7 @@ def get_slide_layout_names() -> str:
             pass
         return json.dumps(layouts, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1096,10 +1371,13 @@ def get_slide_layout_names() -> str:
 
 @mcp.tool()
 def set_slide_background(slide_index: int, color: str = "", image_path: str = "") -> str:
-    """Set the background of a slide to a solid color or an image."""
+    """Set the background of a slide to a solid color ('#RRGGBB' or 'R,G,B') or an image file path."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        if color:
+            _validate_color(color)
         slide = get_slide(pres, slide_index)
 
         slide.FollowMasterBackground = 0  # msoFalse
@@ -1110,17 +1388,17 @@ def set_slide_background(slide_index: int, color: str = "", image_path: str = ""
         elif image_path:
             abs_path = os.path.abspath(image_path)
             if not os.path.isfile(abs_path):
-                return json.dumps({"error": f"Image not found: {abs_path}"}, indent=2)
+                return _err(NotFoundError(f"Image not found: {abs_path}"))
             slide.Background.Fill.UserPicture(abs_path)
         else:
-            return json.dumps({"error": "Provide either 'color' or 'image_path'."}, indent=2)
+            return _err(ValidationError("Provide either 'color' or 'image_path'."))
 
         return json.dumps({
             "status": "updated",
             "slide_index": slide_index,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1133,7 +1411,8 @@ def bulk_set_transitions(settings_json: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
-        settings = json.loads(settings_json)
+        _require_writable(pres)
+        settings = _validate_json_list(settings_json, "settings_json")
         results = []
 
         for spec in settings:
@@ -1161,11 +1440,11 @@ def bulk_set_transitions(settings_json: str) -> str:
                     "error": str(slide_err),
                 })
 
-        return json.dumps(results, indent=2)
-    except json.JSONDecodeError as je:
-        return json.dumps({"error": f"Invalid JSON: {je}"}, indent=2)
+        return _ok_list(results, "transitions")
+    except (PPTError, json.JSONDecodeError) as e:
+        return _err(e)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1187,9 +1466,9 @@ def get_shapes(slide_index: int) -> str:
         shapes = []
         for i in range(1, slide.Shapes.Count + 1):
             shapes.append(shape_to_dict(slide.Shapes(i)))
-        return json.dumps(shapes, indent=2)
+        return _ok_list(shapes, "shapes")
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1265,7 +1544,7 @@ def get_shape_details(slide_index: int, shape_name: str) -> str:
 
         return json.dumps(info, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1287,10 +1566,14 @@ def add_textbox(
     italic: bool = False,
     alignment: str = "left",
 ) -> str:
-    """Add a text box to a slide with optional font formatting and alignment."""
+    """Add a text box to a slide with optional font formatting and alignment. Positions/sizes in inches; width/height must be > 0."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        _validate_positive_dimensions(width=width, height=height)
+        if font_color:
+            _validate_color(font_color)
         slide = get_slide(pres, slide_index)
 
         shape = slide.Shapes.AddTextbox(
@@ -1319,7 +1602,7 @@ def add_textbox(
 
         return json.dumps(shape_to_dict(shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1343,31 +1626,43 @@ def modify_text(
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
+        changed = []
         tr = shape.TextFrame.TextRange
         if text:
             tr.Text = text
+            changed.append("text")
         if font_size > 0:
             tr.Font.Size = font_size
+            changed.append("font_size")
         if font_name:
             tr.Font.Name = font_name
+            changed.append("font_name")
         if font_color:
+            _validate_color(font_color)
             tr.Font.Color.RGB = _parse_color(font_color)
+            changed.append("font_color")
         if bold != -1:
             tr.Font.Bold = -1 if bold == 1 else 0
+            changed.append("bold")
         if italic != -1:
             tr.Font.Italic = -1 if italic == 1 else 0
+            changed.append("italic")
         if alignment:
             align_map = {"left": 1, "center": 2, "right": 3, "justify": 4}
             align_val = align_map.get(alignment.lower())
             if align_val is not None:
                 tr.ParagraphFormat.Alignment = align_val
+                changed.append("alignment")
 
-        return json.dumps(shape_to_dict(shape), indent=2)
+        result = shape_to_dict(shape)
+        result["changed"] = changed
+        return json.dumps(result, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1386,17 +1681,21 @@ def add_shape(
     line_color: str = "",
     text: str = "",
 ) -> str:
-    """Add an auto-shape to a slide. shape_type must be a key from AUTOSHAPE_MAP."""
+    """Add an auto-shape to a slide. shape_type must be a key from AUTOSHAPE_MAP. width/height must be > 0 (inches)."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        _validate_positive_dimensions(width=width, height=height)
+        if fill_color:
+            _validate_color(fill_color)
+        if line_color:
+            _validate_color(line_color)
         slide = get_slide(pres, slide_index)
 
         type_id = AUTOSHAPE_MAP.get(shape_type.lower())
         if type_id is None:
-            return json.dumps({
-                "error": f"Unknown shape_type '{shape_type}'. Supported: {', '.join(AUTOSHAPE_MAP.keys())}"
-            }, indent=2)
+            return _err(ValidationError(f"Unknown shape_type '{shape_type}'. Supported: {', '.join(AUTOSHAPE_MAP.keys())}"))
 
         shape = slide.Shapes.AddShape(
             type_id,
@@ -1416,7 +1715,7 @@ def add_shape(
 
         return json.dumps(shape_to_dict(shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1439,6 +1738,7 @@ def add_line(
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
 
         shape = slide.Shapes.AddLine(
@@ -1457,7 +1757,7 @@ def add_line(
 
         return json.dumps(shape_to_dict(shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1477,34 +1777,50 @@ def modify_shape(
     line_color: str = "",
     name: str = "",
 ) -> str:
-    """Update shape properties. Only non-default values are applied. Positions in inches."""
+    """Update shape properties (inches). Only non-default values are applied. width/height must be > 0 if provided."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
+        changed = []
         if left >= 0:
             shape.Left = _inches_to_points(left)
+            changed.append("left")
         if top >= 0:
             shape.Top = _inches_to_points(top)
+            changed.append("top")
         if width >= 0:
+            _validate_positive_dimensions(width=width)
             shape.Width = _inches_to_points(width)
+            changed.append("width")
         if height >= 0:
+            _validate_positive_dimensions(height=height)
             shape.Height = _inches_to_points(height)
+            changed.append("height")
         if rotation >= 0:
             shape.Rotation = rotation
+            changed.append("rotation")
         if fill_color:
+            _validate_color(fill_color)
             shape.Fill.Solid()
             shape.Fill.ForeColor.RGB = _parse_color(fill_color)
+            changed.append("fill_color")
         if line_color:
+            _validate_color(line_color)
             shape.Line.ForeColor.RGB = _parse_color(line_color)
+            changed.append("line_color")
         if name:
             shape.Name = name
+            changed.append("name")
 
-        return json.dumps(shape_to_dict(shape), indent=2)
+        result = shape_to_dict(shape)
+        result["changed"] = changed
+        return json.dumps(result, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1517,6 +1833,7 @@ def delete_shape(slide_index: int, shape_name: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
         shape.Delete()
@@ -1525,7 +1842,7 @@ def delete_shape(slide_index: int, shape_name: str) -> str:
             "shape_name": shape_name,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1538,8 +1855,9 @@ def group_shapes(slide_index: int, shape_names_json: str, group_name: str = "") 
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
-        names = json.loads(shape_names_json)
+        names = _validate_json_list(shape_names_json, "shape_names_json")
 
         import win32com.client
         names_array = win32com.client.VARIANT(0x2008, names)  # VT_ARRAY | VT_BSTR
@@ -1550,9 +1868,9 @@ def group_shapes(slide_index: int, shape_names_json: str, group_name: str = "") 
 
         return json.dumps(shape_to_dict(group), indent=2)
     except json.JSONDecodeError as je:
-        return json.dumps({"error": f"Invalid JSON: {je}"}, indent=2)
+        return _err(je)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1565,6 +1883,7 @@ def ungroup_shapes(slide_index: int, group_name: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         group = get_shape(slide, group_name)
         ungrouped = group.Ungroup()
@@ -1578,7 +1897,7 @@ def ungroup_shapes(slide_index: int, group_name: str) -> str:
             "shapes": shapes,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1587,10 +1906,12 @@ def ungroup_shapes(slide_index: int, group_name: str) -> str:
 
 @mcp.tool()
 def add_hyperlink(slide_index: int, shape_name: str, url: str, tooltip: str = "") -> str:
-    """Add a hyperlink to a shape."""
+    """Add a hyperlink to a shape. URL must start with http:// or https://."""
     try:
+        _validate_url(url)
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
@@ -1604,7 +1925,7 @@ def add_hyperlink(slide_index: int, shape_name: str, url: str, tooltip: str = ""
             "url": url,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1622,6 +1943,7 @@ def add_connector(
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape1 = get_shape(slide, shape1_name)
         shape2 = get_shape(slide, shape2_name)
@@ -1636,7 +1958,7 @@ def add_connector(
 
         return json.dumps(shape_to_dict(connector), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1649,8 +1971,9 @@ def align_shapes(slide_index: int, shape_names_json: str, alignment: str = "cent
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
-        names = json.loads(shape_names_json)
+        names = _validate_json_list(shape_names_json, "shape_names_json")
 
         align_map = {
             "left": 0,      # msoAlignLefts
@@ -1672,9 +1995,9 @@ def align_shapes(slide_index: int, shape_names_json: str, alignment: str = "cent
             "shapes": names,
         }, indent=2)
     except json.JSONDecodeError as je:
-        return json.dumps({"error": f"Invalid JSON: {je}"}, indent=2)
+        return _err(je)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1687,8 +2010,9 @@ def distribute_shapes(slide_index: int, shape_names_json: str, direction: str = 
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
-        names = json.loads(shape_names_json)
+        names = _validate_json_list(shape_names_json, "shape_names_json")
 
         dist_map = {
             "horizontal": 0,  # msoDistributeHorizontally
@@ -1706,9 +2030,9 @@ def distribute_shapes(slide_index: int, shape_names_json: str, direction: str = 
             "shapes": names,
         }, indent=2)
     except json.JSONDecodeError as je:
-        return json.dumps({"error": f"Invalid JSON: {je}"}, indent=2)
+        return _err(je)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1721,6 +2045,7 @@ def duplicate_shape(slide_index: int, shape_name: str, offset_x: float = 0.5, of
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
@@ -1730,7 +2055,7 @@ def duplicate_shape(slide_index: int, shape_name: str, offset_x: float = 0.5, of
 
         return json.dumps(shape_to_dict(new_shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1743,6 +2068,7 @@ def set_shape_z_order(slide_index: int, shape_name: str, action: str = "front") 
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
@@ -1761,7 +2087,7 @@ def set_shape_z_order(slide_index: int, shape_name: str, action: str = "front") 
             "z_order_action": action,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1811,11 +2137,11 @@ def bulk_add_shapes(slide_index: int, shapes_json: str) -> str:
             except Exception as shape_err:
                 results.append({"error": str(shape_err)})
 
-        return json.dumps(results, indent=2)
+        return _ok_list(results, "shapes")
     except json.JSONDecodeError as je:
-        return json.dumps({"error": f"Invalid JSON: {je}"}, indent=2)
+        return _err(je)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1833,11 +2159,13 @@ def set_placeholder_text(
     bold: bool = False,
     italic: bool = False,
 ) -> str:
-    """Set text and formatting on a slide placeholder by index."""
+    """Set text and formatting on a slide placeholder by 1-based index."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
+        _validate_placeholder_index(slide, placeholder_index)
 
         placeholder = slide.Shapes.Placeholders(placeholder_index)
         tr = placeholder.TextFrame.TextRange
@@ -1859,7 +2187,7 @@ def set_placeholder_text(
             "placeholder_index": placeholder_index,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1876,13 +2204,13 @@ def insert_image(
     width: float = 0,
     height: float = 0,
 ) -> str:
-    """Insert an image from a local file path onto a slide."""
+    """Insert an image from a local file path onto a slide. Positions in inches."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        abs_path = _validate_file_exists(image_path)
         slide = get_slide(pres, slide_index)
-
-        abs_path = os.path.abspath(image_path)
         l_pts = _inches_to_points(left)
         t_pts = _inches_to_points(top)
         w_pts = _inches_to_points(width) if width > 0 else -1
@@ -1899,7 +2227,7 @@ def insert_image(
         )
         return json.dumps(shape_to_dict(shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -1911,13 +2239,15 @@ def insert_image_from_url(
     width: float = 0,
     height: float = 0,
 ) -> str:
-    """Download an image from a URL and insert it onto a slide."""
+    """Download an image from a URL and insert it onto a slide. Positions in inches."""
     try:
         import urllib.request
         import tempfile
 
+        _validate_url(url)
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
 
         # Download to a temp file
@@ -1947,7 +2277,7 @@ def insert_image_from_url(
 
         return json.dumps(result, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -1961,10 +2291,16 @@ def add_table(
     height: float,
     data_json: str = "",
 ) -> str:
-    """Add a table to a slide. Optionally fill with data from a 2D JSON array."""
+    """Add a table to a slide. rows >= 1, cols >= 1. Optionally fill with data from a 2D JSON array. Positions in inches."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        _validate_positive_dimensions(width=width, height=height)
+        if rows < 1:
+            raise ValidationError(f"'rows' must be >= 1, got {rows}")
+        if cols < 1:
+            raise ValidationError(f"'cols' must be >= 1, got {cols}")
         slide = get_slide(pres, slide_index)
 
         l_pts = _inches_to_points(left)
@@ -1989,7 +2325,7 @@ def add_table(
             "cols": cols,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2005,14 +2341,17 @@ def modify_table_cell(
     bold: bool = False,
     fill_color: str = "",
 ) -> str:
-    """Modify the text and formatting of a single table cell."""
+    """Modify the text and formatting of a single table cell (1-based row/col)."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
-        cell = shape.Table.Cell(row, col)
+        table = shape.Table
+        _validate_table_bounds(table, row, col)
+        cell = table.Cell(row, col)
         tr = cell.Shape.TextFrame.TextRange
         tr.Text = text
 
@@ -2034,7 +2373,7 @@ def modify_table_cell(
             "col": col,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2047,17 +2386,24 @@ def bulk_fill_table(
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
-        data = json.loads(data_json)
+        data = _validate_json_list(data_json, "data_json")
         table = shape.Table
+        max_rows = table.Rows.Count
+        max_cols = table.Columns.Count
         rows_filled = 0
         cols_filled = 0
 
         for r_idx, row_data in enumerate(data):
+            if r_idx + 1 > max_rows:
+                break
             rows_filled = max(rows_filled, r_idx + 1)
             for c_idx, cell_val in enumerate(row_data):
+                if c_idx + 1 > max_cols:
+                    break
                 cols_filled = max(cols_filled, c_idx + 1)
                 table.Cell(r_idx + 1, c_idx + 1).Shape.TextFrame.TextRange.Text = str(cell_val)
 
@@ -2066,8 +2412,10 @@ def bulk_fill_table(
             "rows": rows_filled,
             "cols": cols_filled,
         }, indent=2)
+    except (PPTError, json.JSONDecodeError) as e:
+        return _err(e)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2083,10 +2431,17 @@ def format_table(
     row_color1: str = "",
     row_color2: str = "",
 ) -> str:
-    """Format a table with banding, header styling, and alternating row colors."""
+    """Format a table with banding, header styling, and alternating row colors. Colors as '#RRGGBB' or 'R,G,B'."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        if header_color:
+            _validate_color(header_color)
+        if row_color1:
+            _validate_color(row_color1)
+        if row_color2:
+            _validate_color(row_color2)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
@@ -2132,7 +2487,7 @@ def format_table(
             "shape_name": shape.Name,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2179,37 +2534,39 @@ def add_chart(
         # Populate chart data via the embedded workbook
         chart.ChartData.Activate()
         wb = chart.ChartData.Workbook
-        ws = wb.Worksheets(1)
-
-        # Clear existing data
-        ws.Cells.Clear()
-
-        # Write categories in column A starting at row 2
-        for i, cat in enumerate(categories):
-            ws.Cells(i + 2, 1).Value = str(cat)
-
-        # Write series
-        for s_idx, series in enumerate(series_list):
-            col = s_idx + 2
-            ws.Cells(1, col).Value = series.get("name", f"Series {s_idx + 1}")
-            for v_idx, val in enumerate(series.get("values", [])):
-                ws.Cells(v_idx + 2, col).Value = val
-
-        # Set the data range on the workbook so chart picks it up
-        total_rows = len(categories) + 1
-        total_cols = len(series_list) + 1
-        if total_cols <= 26:
-            last_col_letter = chr(ord('A') + total_cols - 1)
-        else:
-            last_col_letter = 'Z'
-        range_str = f"A1:{last_col_letter}{total_rows}"
         try:
-            # Try setting the range via the worksheet's ListObjects or named range
-            ws.Range(f"A1:{last_col_letter}{total_rows}").Select()
-        except Exception:
-            pass  # Range selection not critical — chart auto-detects data
+            ws = wb.Worksheets(1)
 
-        wb.Close(True)
+            # Clear existing data
+            ws.Cells.Clear()
+
+            # Write categories in column A starting at row 2
+            for i, cat in enumerate(categories):
+                ws.Cells(i + 2, 1).Value = str(cat)
+
+            # Write series
+            for s_idx, series in enumerate(series_list):
+                col = s_idx + 2
+                ws.Cells(1, col).Value = series.get("name", f"Series {s_idx + 1}")
+                for v_idx, val in enumerate(series.get("values", [])):
+                    ws.Cells(v_idx + 2, col).Value = val
+
+            # Set the data range on the workbook so chart picks it up
+            total_rows = len(categories) + 1
+            total_cols = len(series_list) + 1
+            if total_cols <= 26:
+                last_col_letter = chr(ord('A') + total_cols - 1)
+            else:
+                last_col_letter = 'Z'
+            try:
+                ws.Range(f"A1:{last_col_letter}{total_rows}").Select()
+            except Exception:
+                pass  # Range selection not critical — chart auto-detects data
+        finally:
+            try:
+                wb.Close(True)
+            except Exception:
+                pass
 
         if title:
             chart.HasTitle = -1  # msoTrue
@@ -2217,7 +2574,7 @@ def add_chart(
 
         return json.dumps(shape_to_dict(shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2228,7 +2585,7 @@ def modify_chart(
     has_legend: bool = True,
     legend_position: str = "",
 ) -> str:
-    """Modify chart title and legend properties."""
+    """Modify chart title and legend properties. legend_position: bottom, top, left, right."""
     try:
         legend_pos_map = {
             "bottom": 4,
@@ -2260,7 +2617,7 @@ def modify_chart(
             "shape_name": shape.Name,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2283,42 +2640,46 @@ def update_chart_data(
 
         chart.ChartData.Activate()
         wb = chart.ChartData.Workbook
-        ws = wb.Worksheets(1)
-
-        # Clear existing data
-        ws.Cells.Clear()
-
-        # Write categories in column A starting at row 2
-        for i, cat in enumerate(categories):
-            ws.Cells(i + 2, 1).Value = str(cat)
-
-        # Write series
-        for s_idx, series in enumerate(series_list):
-            col = s_idx + 2
-            ws.Cells(1, col).Value = series.get("name", f"Series {s_idx + 1}")
-            for v_idx, val in enumerate(series.get("values", [])):
-                ws.Cells(v_idx + 2, col).Value = val
-
-        # Select the data range so chart picks it up
-        total_rows = len(categories) + 1
-        total_cols = len(series_list) + 1
-        if total_cols <= 26:
-            last_col_letter = chr(ord('A') + total_cols - 1)
-        else:
-            last_col_letter = 'Z'
         try:
-            ws.Range(f"A1:{last_col_letter}{total_rows}").Select()
-        except Exception:
-            pass  # Chart auto-detects data range
+            ws = wb.Worksheets(1)
 
-        wb.Close(True)
+            # Clear existing data
+            ws.Cells.Clear()
+
+            # Write categories in column A starting at row 2
+            for i, cat in enumerate(categories):
+                ws.Cells(i + 2, 1).Value = str(cat)
+
+            # Write series
+            for s_idx, series in enumerate(series_list):
+                col = s_idx + 2
+                ws.Cells(1, col).Value = series.get("name", f"Series {s_idx + 1}")
+                for v_idx, val in enumerate(series.get("values", [])):
+                    ws.Cells(v_idx + 2, col).Value = val
+
+            # Select the data range so chart picks it up
+            total_rows = len(categories) + 1
+            total_cols = len(series_list) + 1
+            if total_cols <= 26:
+                last_col_letter = chr(ord('A') + total_cols - 1)
+            else:
+                last_col_letter = 'Z'
+            try:
+                ws.Range(f"A1:{last_col_letter}{total_rows}").Select()
+            except Exception:
+                pass  # Chart auto-detects data range
+        finally:
+            try:
+                wb.Close(True)
+            except Exception:
+                pass
 
         return json.dumps({
             "status": "updated",
             "shape_name": shape.Name,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2330,13 +2691,14 @@ def insert_video(
     width: float,
     height: float,
 ) -> str:
-    """Insert a video file onto a slide."""
+    """Insert a video file onto a slide. Positions in inches; width/height must be > 0."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        _validate_positive_dimensions(width=width, height=height)
+        abs_path = _validate_file_exists(video_path)
         slide = get_slide(pres, slide_index)
-
-        abs_path = os.path.abspath(video_path)
         l_pts = _inches_to_points(left)
         t_pts = _inches_to_points(top)
         w_pts = _inches_to_points(width)
@@ -2353,7 +2715,7 @@ def insert_video(
         )
         return json.dumps(shape_to_dict(shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2367,9 +2729,9 @@ def insert_audio(
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        abs_path = _validate_file_exists(audio_path)
         slide = get_slide(pres, slide_index)
-
-        abs_path = os.path.abspath(audio_path)
         l_pts = _inches_to_points(left)
         t_pts = _inches_to_points(top)
 
@@ -2382,7 +2744,7 @@ def insert_audio(
         )
         return json.dumps(shape_to_dict(shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2395,13 +2757,14 @@ def insert_ole_object(
     height: float,
     as_icon: bool = False,
 ) -> str:
-    """Insert an OLE embedded object (e.g., Excel, Word, PDF) onto a slide."""
+    """Insert an OLE embedded object (e.g., Excel, Word, PDF) onto a slide. Positions in inches; width/height must be > 0."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        _validate_positive_dimensions(width=width, height=height)
+        abs_path = _validate_file_exists(file_path)
         slide = get_slide(pres, slide_index)
-
-        abs_path = os.path.abspath(file_path)
         l_pts = _inches_to_points(left)
         t_pts = _inches_to_points(top)
         w_pts = _inches_to_points(width)
@@ -2417,7 +2780,7 @@ def insert_ole_object(
         )
         return json.dumps(shape_to_dict(shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2433,6 +2796,7 @@ def crop_image(
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
@@ -2451,7 +2815,7 @@ def crop_image(
             "shape_name": shape.Name,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2464,6 +2828,8 @@ def replace_image(
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        _validate_file_exists(new_image_path)
         slide = get_slide(pres, slide_index)
         old_shape = get_shape(slide, shape_name)
 
@@ -2489,7 +2855,7 @@ def replace_image(
         )
         return json.dumps(shape_to_dict(new_shape), indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2556,7 +2922,7 @@ def get_theme_info() -> str:
             "fonts": {"major_font": major_font, "minor_font": minor_font},
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2565,14 +2931,15 @@ def apply_theme(theme_path: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
-        abs_path = os.path.abspath(theme_path)
+        _require_writable(pres)
+        abs_path = _validate_file_exists(theme_path)
         pres.ApplyTheme(abs_path)
         return json.dumps({
             "status": "applied",
             "theme_path": abs_path,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2610,15 +2977,17 @@ def get_theme_colors() -> str:
                 })
         return json.dumps(colors, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
 def set_theme_color(slot: str, color: str) -> str:
-    """Set a theme color slot by name (e.g. 'Accent1', 'Text1') to a new color ('#RRGGBB' or 'R,G,B')."""
+    """Set a theme color slot by name (e.g. 'Accent1', 'Text1') to a new color ('#RRGGBB' or 'R,G,B'). Valid slots: background1, text1, background2, text2, accent1-6, hyperlink, followedhyperlink."""
     try:
+        _validate_color(color)
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
 
         slot_map = {
             "background1": 1, "text1": 2, "background2": 3, "text2": 4,
@@ -2638,7 +3007,7 @@ def set_theme_color(slot: str, color: str) -> str:
             "color": color,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2655,7 +3024,7 @@ def get_theme_fonts() -> str:
             "minor_font": minor_font,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2664,6 +3033,7 @@ def set_theme_fonts(major_font: str = "", minor_font: str = "") -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         font_scheme = pres.SlideMaster.Theme.ThemeFontScheme
         updated = []
 
@@ -2699,7 +3069,7 @@ def set_theme_fonts(major_font: str = "", minor_font: str = "") -> str:
             "updated_fields": updated,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2718,7 +3088,7 @@ def get_master_layouts(master_index: int = 1) -> str:
             })
         return json.dumps(layouts, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2732,10 +3102,11 @@ def modify_master_placeholder(
     bold: bool = False,
     italic: bool = False,
 ) -> str:
-    """Modify font formatting of a placeholder in a master layout."""
+    """Modify font formatting of a placeholder in a master layout. font_size in points."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         layout = pres.Designs(master_index).SlideMaster.CustomLayouts(layout_index)
         ph = layout.Shapes.Placeholders(placeholder_index)
         font = ph.TextFrame.TextRange.Font
@@ -2758,7 +3129,7 @@ def modify_master_placeholder(
             "placeholder_index": placeholder_index,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2769,10 +3140,17 @@ def set_background(
     gradient_color1: str = "",
     gradient_color2: str = "",
 ) -> str:
-    """Set background of a slide (by 1-based index) or the slide master (index=0). Supports solid color, image, or two-color gradient."""
+    """Set background of a slide (by 1-based index) or the slide master (index=0). Supports solid color ('#RRGGBB'), image, or two-color gradient."""
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
+        if color:
+            _validate_color(color)
+        if gradient_color1:
+            _validate_color(gradient_color1)
+        if gradient_color2:
+            _validate_color(gradient_color2)
 
         if slide_index == 0:
             bg = pres.SlideMaster.Background
@@ -2802,7 +3180,7 @@ def set_background(
             "target": "slide_master" if slide_index == 0 else f"slide_{slide_index}",
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2834,9 +3212,9 @@ def get_placeholders(slide_index: int) -> str:
                 "has_text": has_text,
                 "text": text,
             })
-        return json.dumps(placeholders, indent=2)
+        return _ok_list(placeholders, "placeholders")
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2845,6 +3223,7 @@ def add_custom_layout(master_index: int = 1, name: str = "Custom Layout") -> str
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         master = pres.Designs(master_index).SlideMaster
         new_index = master.CustomLayouts.Count + 1
         layout = master.CustomLayouts.Add(new_index)
@@ -2855,7 +3234,7 @@ def add_custom_layout(master_index: int = 1, name: str = "Custom Layout") -> str
             "index": new_index,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2864,7 +3243,8 @@ def copy_master_from(source_path: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
-        abs_path = os.path.abspath(source_path)
+        _require_writable(pres)
+        abs_path = _validate_file_exists(source_path)
 
         # Open source read-only (ReadOnly=-1 is msoTrue)
         source_pres = app.Presentations.Open(abs_path, ReadOnly=-1)
@@ -2883,7 +3263,7 @@ def copy_master_from(source_path: str) -> str:
             "designs_count": designs_copied,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2897,6 +3277,7 @@ def find_and_replace(find_text: str, replace_text: str, match_case: bool = False
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         replacements_count = 0
         slides_affected = set()
 
@@ -2930,7 +3311,7 @@ def find_and_replace(find_text: str, replace_text: str, match_case: bool = False
             "slides_affected": len(slides_affected),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -2967,9 +3348,9 @@ def extract_all_text(include_notes: bool = True) -> str:
                 "notes": notes,
             })
 
-        return json.dumps(results, indent=2)
+        return _ok_list(results, "slides")
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3019,7 +3400,7 @@ def get_presentation_outline() -> str:
 
         return json.dumps({"slides": slides_list}, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3032,12 +3413,13 @@ def merge_presentations(file_paths_json: str, insert_at: int = 0) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
-        file_paths = json.loads(file_paths_json)
+        _require_writable(pres)
+        file_paths = _validate_json_list(file_paths_json, "file_paths_json")
         total_inserted = 0
         insert_position = insert_at if insert_at > 0 else pres.Slides.Count
 
         for fp in file_paths:
-            abs_path = os.path.abspath(fp)
+            abs_path = _validate_file_exists(fp)
             before_count = pres.Slides.Count
             pres.Slides.InsertFromFile(abs_path, insert_position)
             added = pres.Slides.Count - before_count
@@ -3050,7 +3432,7 @@ def merge_presentations(file_paths_json: str, insert_at: int = 0) -> str:
             "total_slides_inserted": total_inserted,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3059,26 +3441,28 @@ def apply_template(template_path: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
-        abs_path = os.path.abspath(template_path)
+        _require_writable(pres)
+        abs_path = _validate_file_exists(template_path)
         pres.ApplyTemplate(abs_path)
         return json.dumps({
             "status": "applied",
             "template": abs_path,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
 def bulk_format_text(criteria_json: str) -> str:
     """Apply formatting to all matching text across the presentation.
 
-    criteria_json: JSON with {find_text, font_size, font_name, font_color, bold, italic}.
+    criteria_json: JSON object with {find_text, font_size, font_name, font_color, bold, italic}.
     """
     try:
         app = get_app()
         pres = get_pres(app)
-        criteria = json.loads(criteria_json)
+        _require_writable(pres)
+        criteria = _validate_json_dict(criteria_json, "criteria_json")
         find_text = criteria.get("find_text", "")
         matches_formatted = 0
 
@@ -3113,7 +3497,7 @@ def bulk_format_text(criteria_json: str) -> str:
             "matches_formatted": matches_formatted,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3121,12 +3505,14 @@ def add_animation(slide_index: int, shape_name: str, effect: str = "appear",
                   duration: float = 0.5, delay: float = 0, trigger: str = "on_click") -> str:
     """Add an animation effect to a shape on a slide.
 
-    effect: one of appear, fade, fly_in, wipe, split, wheel, grow_shrink.
+    effect: one of appear, fade, fly_in, wipe, split, wheel, grow_shrink, bounce, swivel, spiral_in, expand, float_up, float_down, zoom, rise_up.
     trigger: on_click, with_previous, after_previous.
+    duration/delay in seconds.
     """
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
@@ -3150,7 +3536,7 @@ def add_animation(slide_index: int, shape_name: str, effect: str = "appear",
             "trigger": trigger,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3159,6 +3545,7 @@ def remove_animation(slide_index: int, shape_name: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         seq = slide.TimeLine.MainSequence
         removed = 0
@@ -3179,7 +3566,7 @@ def remove_animation(slide_index: int, shape_name: str) -> str:
             "count": removed,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3230,7 +3617,7 @@ def get_animations(slide_index: int) -> str:
             "animations": animations,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3242,8 +3629,9 @@ def reorder_animations(slide_index: int, order_json: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
-        desired_order = json.loads(order_json)
+        desired_order = _validate_json_list(order_json, "order_json")
         seq = slide.TimeLine.MainSequence
 
         # Reorder by moving effects to match the desired sequence
@@ -3265,7 +3653,7 @@ def reorder_animations(slide_index: int, order_json: str) -> str:
             "order": desired_order,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3277,7 +3665,8 @@ def bulk_speaker_notes(notes_json: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
-        items = json.loads(notes_json)
+        _require_writable(pres)
+        items = _validate_json_list(notes_json, "notes_json")
         updated = 0
 
         for item in items:
@@ -3292,7 +3681,7 @@ def bulk_speaker_notes(notes_json: str) -> str:
             "count": updated,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3304,6 +3693,7 @@ def clone_formatting(slide_index: int, source_shape: str, target_shapes_json: st
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         src = get_shape(slide, source_shape)
         targets = json.loads(target_shapes_json)
@@ -3386,7 +3776,7 @@ def clone_formatting(slide_index: int, source_shape: str, target_shapes_json: st
             "targets_updated": updated,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3430,7 +3820,7 @@ def search_shapes(query: str, search_text: bool = True, search_names: bool = Tru
             "total_found": len(matches),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3439,6 +3829,7 @@ def rename_shape(slide_index: int, old_name: str, new_name: str) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, old_name)
         shape.Name = new_name
@@ -3448,7 +3839,7 @@ def rename_shape(slide_index: int, old_name: str, new_name: str) -> str:
             "new_name": new_name,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3457,6 +3848,7 @@ def lock_shape(slide_index: int, shape_name: str, lock: bool = True) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide = get_slide(pres, slide_index)
         shape = get_shape(slide, shape_name)
 
@@ -3476,7 +3868,7 @@ def lock_shape(slide_index: int, shape_name: str, lock: bool = True) -> str:
             "lock_aspect_ratio": lock,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3488,6 +3880,7 @@ def add_section(name: str, before_slide: int = 0) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         slide_idx = before_slide if before_slide > 0 else pres.Slides.Count + 1
         section_index = pres.SectionProperties.AddSection(slide_idx, name)
         return json.dumps({
@@ -3496,7 +3889,7 @@ def add_section(name: str, before_slide: int = 0) -> str:
             "section_index": section_index,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3518,7 +3911,7 @@ def get_sections() -> str:
 
         return json.dumps({"sections": sections}, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 @mcp.tool()
@@ -3531,6 +3924,7 @@ def delete_section(section_index: int, delete_slides: bool = False) -> str:
     try:
         app = get_app()
         pres = get_pres(app)
+        _require_writable(pres)
         pres.SectionProperties.Delete(section_index, delete_slides)
         return json.dumps({
             "status": "deleted",
@@ -3538,7 +3932,7 @@ def delete_section(section_index: int, delete_slides: bool = False) -> str:
             "slides_deleted": delete_slides,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3605,7 +3999,7 @@ def get_presentation_stats() -> str:
             "total_word_count": total_word_count,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -3637,7 +4031,7 @@ def export_slide_image(slide_index: int, output_path: str, format: str = "png", 
             "width": width,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -3675,7 +4069,7 @@ def export_all_slides_images(output_dir: str, format: str = "png", width: int = 
             "files": exported,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -3733,7 +4127,7 @@ def export_pdf(output_path: str, slides_range: str = "", quality: str = "high") 
             "slides_range": slides_range if slides_range else "all",
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -3778,7 +4172,7 @@ def get_fonts_used() -> str:
             "count": len(fonts),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -3821,7 +4215,7 @@ def get_linked_files() -> str:
             "count": len(linked),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -3901,7 +4295,7 @@ def check_accessibility() -> str:
             "reading_orders": slide_reading_orders,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -3950,7 +4344,7 @@ def get_slide_thumbnails_base64(slide_indices_json: str = "", width: int = 320) 
             "count": len(thumbnails),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -4049,7 +4443,7 @@ def compare_slides(slide_a: int, slide_b: int) -> str:
             "differences_count": len(differences),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -4099,7 +4493,7 @@ def snapshot_to_json() -> str:
             "slides": slides_data,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -4188,7 +4582,7 @@ def get_color_usage() -> str:
             "unique_color_count": len(color_map),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -4306,7 +4700,7 @@ def validate_presentation() -> str:
             "unique_fonts": len(all_fonts),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
@@ -4353,7 +4747,7 @@ def get_text_by_slide() -> str:
             "slide_count": len(slides_text),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _err(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

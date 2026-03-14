@@ -177,7 +177,9 @@ async def test():
         # Use slide 1 (always exists) to avoid index issues
         r = await call("get_placeholders", {"slide_index": 1})
         print(f"  → {r}")
-        if isinstance(r, list):
+        if isinstance(r, dict) and "placeholders" in r:
+            results["get_placeholders"] = "PASS"
+        elif isinstance(r, list):
             results["get_placeholders"] = "PASS"
         else:
             results["get_placeholders"] = "FAIL"

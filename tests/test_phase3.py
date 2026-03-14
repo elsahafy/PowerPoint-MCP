@@ -96,10 +96,11 @@ async def test():
     # -----------------------------------------------------------------------
     try:
         r = await call("get_shapes", {"slide_index": 1})
-        assert isinstance(r, list), f"Expected list: {r}"
-        assert len(r) >= 1, f"Expected at least 1 shape: {r}"
+        assert isinstance(r, dict) and r.get("status") == "ok", f"Expected envelope dict: {r}"
+        shapes = r["shapes"]
+        assert len(shapes) >= 1, f"Expected at least 1 shape: {shapes}"
         results["get_shapes"] = "PASS"
-        print(f"  [PASS] get_shapes         -> {len(r)} shape(s)")
+        print(f"  [PASS] get_shapes         -> {len(shapes)} shape(s)")
     except Exception as e:
         results["get_shapes"] = "FAIL"
         print(f"  [FAIL] get_shapes         -> {e}")
@@ -425,10 +426,11 @@ async def test():
             "slide_index": 1,
             "shapes_json": shapes_spec,
         })
-        assert isinstance(r, list), f"Expected list: {r}"
-        assert len(r) == 2, f"Expected 2 results: {r}"
+        assert isinstance(r, dict) and r.get("status") == "ok", f"Expected envelope dict: {r}"
+        shapes = r["shapes"]
+        assert len(shapes) == 2, f"Expected 2 results: {shapes}"
         results["bulk_add_shapes"] = "PASS"
-        print(f"  [PASS] bulk_add_shapes    -> {len(r)} shapes added")
+        print(f"  [PASS] bulk_add_shapes    -> {len(shapes)} shapes added")
     except Exception as e:
         results["bulk_add_shapes"] = "FAIL"
         print(f"  [FAIL] bulk_add_shapes    -> {e}")

@@ -92,7 +92,9 @@ async def test():
     print("\n[2/18] extract_all_text")
     r = await call("extract_all_text", {"include_notes": True})
     print(f"  -> {r}")
-    if isinstance(r, list):
+    if isinstance(r, dict) and "slides" in r:
+        results["extract_all_text"] = "PASS"
+    elif isinstance(r, list):
         results["extract_all_text"] = "PASS"
     else:
         results["extract_all_text"] = f"FAIL {r}"
@@ -116,7 +118,12 @@ async def test():
         r = await call("save_presentation_as", {"file_path": tmp_merge})
         assert "error" not in r, f"Failed to save merge source: {r}"
         slides_before = await call("get_slides")
-        count_before = len(slides_before) if isinstance(slides_before, list) else 0
+        if isinstance(slides_before, dict) and "slides" in slides_before:
+            count_before = len(slides_before["slides"])
+        elif isinstance(slides_before, list):
+            count_before = len(slides_before)
+        else:
+            count_before = 0
         r = await call("merge_presentations", {
             "file_paths_json": json.dumps([tmp_merge]),
         })
